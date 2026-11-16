@@ -147,6 +147,14 @@ else()
     target_sources(FRSWorldEditor PRIVATE src/ui/NoExtensions.cpp)
 endif()
 
+# New regions and region import (ui/RegionTools, ui/ImportTools) are not
+# ready for players yet: package.ps1 builds the release with this OFF, which
+# leaves File > New Region and World > Import Region out of the editor.
+option(FRS_WITH_REGIONS "File > New Region and World > Import Region" ON)
+if(NOT FRS_WITH_REGIONS)
+    target_compile_definitions(FRSWorldEditor PRIVATE FRS_NO_REGIONS)
+endif()
+
 target_compile_definitions(FRSWorldEditor PRIVATE
     UNICODE _UNICODE
     WIN32_LEAN_AND_MEAN

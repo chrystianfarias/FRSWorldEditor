@@ -771,6 +771,7 @@ void MainWindow::OnCreate() {
         host.menuChecks = [this] { UpdateMenuChecks(); };
         extensions_.push_back(std::make_unique<FogTools>(std::move(host)));
     }
+#ifndef FRS_NO_REGIONS   // CMake FRS_WITH_REGIONS: off in the release build
     // New regions (ui/RegionTools.h): File > New Region.
     {
         RegionToolsHost host;
@@ -798,6 +799,7 @@ void MainWindow::OnCreate() {
         host.reopenRegion = [this](const std::wstring& region) { ReopenRegions(region); };
         extensions_.push_back(std::make_unique<ImportTools>(std::move(host)));
     }
+#endif
     // Collision editing (ui/CollisionTools.h) is part of every build, asked
     // after the build's own extensions.
     {
