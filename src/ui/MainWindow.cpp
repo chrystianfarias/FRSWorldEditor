@@ -10,6 +10,7 @@
 #include "ui/FogTools.h"
 #include "ui/RegionTools.h"
 #include "ui/ImportTools.h"
+#include "io/SectionSplice.h"
 #include "ui/HiddenItems.h"
 #include "ui/ReferenceImages.h"
 #include "ui/ZoneTools.h"
@@ -2655,6 +2656,14 @@ void MainWindow::OpenRegion(std::wstring region) {
     world->SetOverlayFolder(modelsFolder_);
 
     if (!world->Open(tracksFolder_, region)) {
+        ::MessageBoxW(window_, Format(L"Could not open region %s.", region.c_str()).c_str(),
+                      kWindowTitle, MB_ICONERROR | MB_OK);
+        return;
+    }
+    // Sections whose edited bytes share stream space (io/SectionSplice.h):
+    // moved apart, and the region read again with them where they now are.
+    if (!world->IsUnderground1() && RepairOverlappingSpans(*world, modelsFolder_) > 0 &&
+        !world->Open(tracksFolder_, region)) {
         ::MessageBoxW(window_, Format(L"Could not open region %s.", region.c_str()).c_str(),
                       kWindowTitle, MB_ICONERROR | MB_OK);
         return;
