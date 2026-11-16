@@ -10,7 +10,9 @@
 #include "nfs/SceneryEdit.h"
 #include "nfs/World.h"
 
+#include <cstdio>
 #include <sstream>
+#include <string>
 
 namespace {
 
@@ -140,7 +142,25 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
             ByteSpan object;
             u64 objectOffset = 0;
             if (!FindModelChunk(world, hash, object, objectOffset)) {
-                report << name << L": a model to copy in could not be found. Left alone.\n";
+                // Named in full -- model, hash and the section it was looked
+                // for in -- so a report from a user says which one it was.
+                const nfs::SolidObject* solid = world.FindModel(hash);
+                const std::string modelName = solid ? solid->name : std::string("(unknown model)");
+                const size_t home = world.ModelHome(hash);
+                std::string homeName;
+                if (home >= loaded.size())
+                    homeName = "no loaded section holds it";
+                else if (!loaded[home]->info)
+                    homeName = "its section has no table entry";
+                else
+                    homeName = "not found in the bytes of section " + loaded[home]->info->name;
+                char hashText[16];
+                std::snprintf(hashText, sizeof(hashText), "%08X", hash);
+                LOG_WARN("placements %s: model %s (%s) to copy in: %s", entry.name.c_str(),
+                         modelName.c_str(), hashText, homeName.c_str());
+                report << name << L": the model " << std::wstring(modelName.begin(), modelName.end())
+                       << L" (" << std::wstring(hashText, hashText + 8) << L") could not be copied in: "
+                       << std::wstring(homeName.begin(), homeName.end()) << L". Left alone.\n";
                 failed = true;
                 break;
             }
