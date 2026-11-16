@@ -639,7 +639,8 @@ void WorldRenderer::Render(const Camera& camera) {
         }
 
         const Aabb cullBounds = section.CullBounds(showLibrary_);
-        const bool previewed = Previewed(section.number);   // SetSectionPreview: bounds are stale
+        const SectionPreview* preview = Previewed(section.number);   // SetSectionPreviews: bounds are stale
+        const bool previewed = preview != nullptr;
 
         if (previewed) {
         } else if (usingVisibility) {
@@ -706,12 +707,12 @@ void WorldRenderer::Render(const Camera& camera) {
                                        instance.mirrored ? OppositeCull(cullMode_)
                                                          : cullMode_);
 
-            const Mat4 placed = previewed ? instance.transform * previewDelta_ : instance.transform;
+            const Mat4 placed = previewed ? instance.transform * preview->delta : instance.transform;
             const D3DMATRIX world = ToD3D(placed);
             device->SetTransform(D3DTS_WORLD, &world);
             if (DrawObject(device, object, stats))
                 QueueTranslucent(object, instance.section, placed, instance.mirrored,
-                                 previewed ? Transform(instance.worldBounds, previewDelta_) : instance.worldBounds, eye);
+                                 previewed ? Transform(instance.worldBounds, preview->delta) : instance.worldBounds, eye);
         }
     }
 

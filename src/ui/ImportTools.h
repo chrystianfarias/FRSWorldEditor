@@ -32,15 +32,17 @@ struct ImportToolsHost {
 // World > Import Region... picks a region of the game and bakes all of it into
 // the open one at a free place inside the collision range. Each import is a row
 // of the Explorer's "Imported regions" branch: selected, the gizmo moves it and
-// turns it about Z, the whole region following the drag in the view; let go,
-// it is baked again where it was put and the region reopens. The properties
-// hold its centre and turn; Delete takes it out. Every change is a Ctrl+Z step.
+// turns it about Z -- in the view only: the region is drawn where it is put,
+// and the game keeps it where it was baked. The properties card holds its
+// centre and turn, and Bake, which writes it into the game where it is shown
+// (the region then opens again), and Back to the Baked Place. Delete takes it
+// out. Every change is a Ctrl+Z step.
 class ImportTools : public EditorExtension, public RenderExtension, public ViewportTool, public UndoParticipant {
 public:
     explicit ImportTools(ImportToolsHost host) : host_(std::move(host)) {}
     ~ImportTools() override;
 
-    static constexpr int kImportCommand = 45401;
+    static constexpr int kImportCommand = 45401, kBakeCommand = 45402, kRevertCommand = 45403;
 
     // ---- EditorExtension
     void OnCreate() override;
@@ -95,6 +97,12 @@ private:
     // region file written, and the region opened again. False (nothing
     // changed) when it could not be done; `why` then says so.
     bool Apply(const std::vector<io::RegionImport>& next, std::wstring& why);
+    std::vector<io::RegionImport> List() const;
+    // Each import moved since its bake drawn where it is shown (WorldRenderer::SetSectionPreviews).
+    void RefreshPreviews();
+    // The list written as it is, nothing baked: where the imports are shown.
+    void SaveShown();
+    void Bake(int index);           // the import written into the game where it is shown
     void Remember();
     void ChooseSources();
 
@@ -110,7 +118,6 @@ private:
     io::RegionImport dragStart_;
     io::RegionImport dragNow_;
     Vec3 dragPivot_;
-    bool previewKept_ = false;        // the moved view stays until the region reopens
     bool reopenDue_ = false;
     int  selectAfterReopen_ = -1;
 

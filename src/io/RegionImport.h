@@ -17,7 +17,8 @@ namespace io {
 // streamed by visibility zones of its own.
 //
 // <models>\imports-<TARGET>.txt holds one line per import:
-//   import <SOURCE> <first letter> <x> <y> <z> <yaw degrees>
+//   import <SOURCE> <first letter> <x> <y> <z> <yaw degrees> [<shown x> <y> <z> <yaw>]
+// the four last only while it is shown somewhere it was not baked.
 // Everything else is made again from it: the sections by BakeImport, the
 // region file's table entries and zones by ApplyImports.
 struct RegionImport {
@@ -26,7 +27,16 @@ struct RegionImport {
     Vec3  offset;                 // where the source's origin goes
     float yawDegrees = 0.0f;      // about Z
 
+    // Where the editor shows it, when it was moved since the bake (the
+    // gizmo moves only this; a bake makes it the placement above). The
+    // game always has offset/yawDegrees.
+    bool  moved = false;
+    Vec3  shownOffset;
+    float shownYaw = 0.0f;
+
     Mat4 Transform() const;       // row vectors: world' = world * Transform()
+    Mat4 ShownTransform() const;  // Transform() unless moved
+    RegionImport Shown() const;   // the placement shown, as one to bake
     // The target number of a source section number, 0 when its letter has no room.
     u32 MapNumber(u32 number, const std::vector<int>& letters) const;
 };

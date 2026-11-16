@@ -324,6 +324,18 @@ Mat4 RegionImport::Transform() const {
     return m;
 }
 
+Mat4 RegionImport::ShownTransform() const { return Shown().Transform(); }
+
+RegionImport RegionImport::Shown() const {
+    RegionImport r = *this;
+    if (moved) {
+        r.offset = shownOffset;
+        r.yawDegrees = shownYaw;
+    }
+    r.moved = false;
+    return r;
+}
+
 u32 RegionImport::MapNumber(u32 number, const std::vector<int>& letters) const {
     const int letter = (int)(number / 100);
     const auto it = std::find(letters.begin(), letters.end(), letter);
@@ -349,6 +361,7 @@ bool ReadImports(const std::wstring& modelsFolder, const std::wstring& target, s
         if (!(words >> key) || key != "import") continue;
         if (words >> source >> r.firstLetter >> r.offset.x >> r.offset.y >> r.offset.z >> r.yawDegrees) {
             r.source = std::wstring(source.begin(), source.end());
+            r.moved = (bool)(words >> r.shownOffset.x >> r.shownOffset.y >> r.shownOffset.z >> r.shownYaw);
             out.push_back(r);
         }
     }
@@ -361,12 +374,18 @@ bool WriteImports(const std::wstring& modelsFolder, const std::wstring& target, 
     std::ofstream out(path, std::ios::trunc);
     if (!out) return false;
     out << "# FRS World Editor: whole regions brought into this one (docs/research/region-import.md)\n"
-           "# import <source> <first letter> <x> <y> <z> <yaw degrees>\n";
-    char text[256];
+           "# import <source> <first letter> <x> <y> <z> <yaw degrees> [<shown x> <y> <z> <yaw>, not baked yet]\n";
+    char text[320];
     for (const RegionImport& r : list) {
-        std::snprintf(text, sizeof text, "import %s %d %.3f %.3f %.3f %.4f\n", Narrow(r.source).c_str(), r.firstLetter,
+        std::snprintf(text, sizeof text, "import %s %d %.3f %.3f %.3f %.4f", Narrow(r.source).c_str(), r.firstLetter,
                       r.offset.x, r.offset.y, r.offset.z, r.yawDegrees);
         out << text;
+        if (r.moved) {
+            std::snprintf(text, sizeof text, " %.3f %.3f %.3f %.4f", r.shownOffset.x, r.shownOffset.y, r.shownOffset.z,
+                          r.shownYaw);
+            out << text;
+        }
+        out << "\n";
     }
     return (bool)out;
 }

@@ -93,6 +93,16 @@ void ImportTools::OnCreate() {
 }
 
 bool ImportTools::OnCommand(int id) {
+    if (id == kBakeCommand) { Bake(Selected()); return true; }
+    if (id == kRevertCommand) {
+        const int index = Selected();
+        if (index < 0 || !entries_[(size_t)index].import.moved) return true;
+        Remember();
+        entries_[(size_t)index].import.moved = false;
+        SaveShown();
+        Status(entries_[(size_t)index].import.source + L" is back where the game has it.");
+        return true;
+    }
     if (id != kImportCommand) return false;
     nfs::World* world = World();
     if (!world) {
@@ -224,16 +234,14 @@ void ImportTools::OnRegionLoaded() {
     if (region != undoRegion_) undo_.clear();
     undoRegion_ = region;
     dragging_ = false;
-    previewKept_ = false;
-    Renderer().ClearSectionPreview();
     Load();
+    RefreshPreviews();
     ++version_;
 }
 
 void ImportTools::OnRegionClosed() {
     entries_.clear();
     dragging_ = false;
-    previewKept_ = false;
     Renderer().ClearSectionPreview();
     ++version_;
 }
@@ -307,6 +315,57 @@ bool ImportTools::Apply(const std::vector<io::RegionImport>& next, std::wstring&
     return true;
 }
 
+std::vector<io::RegionImport> ImportTools::List() const {
+    std::vector<io::RegionImport> list;
+    for (const Entry& e : entries_) list.push_back(e.import);
+    return list;
+}
+
+void ImportTools::RefreshPreviews() {
+    std::vector<WorldRenderer::SectionPreview> previews;
+    for (const Entry& e : entries_) {
+        if (!e.import.moved) continue;
+        // From where it is baked to where it is shown: the baked placement
+        // undone, then the shown one.
+        const io::RegionImport shown = e.import.Shown();
+        WorldRenderer::SectionPreview p;
+        p.first = (u32)e.import.firstLetter * 100;
+        p.last = (u32)(e.import.firstLetter + e.letters) * 100;
+        p.delta = Move(e.import.offset * -1.0f) * TurnZ((shown.yawDegrees - e.import.yawDegrees) * kPi / 180.0f) *
+                  Move(shown.offset);
+        previews.push_back(p);
+    }
+    Renderer().SetSectionPreviews(std::move(previews));
+    ++version_;
+    if (host_.updateProperties) host_.updateProperties();
+}
+
+void ImportTools::SaveShown() {
+    nfs::World* world = World();
+    if (world && !io::WriteImports(Models(), world->Region(), List()))
+        Status(L"Could not write " + io::ImportsPath(Models(), world->Region()) + L".");
+    RefreshPreviews();
+}
+
+void ImportTools::Bake(int index) {
+    if (index < 0 || (size_t)index >= entries_.size() || reopenDue_) return;
+    const io::RegionImport& import = entries_[(size_t)index].import;
+    if (!import.moved) {
+        Status(import.source + L" is in the game where it is shown: nothing to bake.");
+        return;
+    }
+    std::vector<io::RegionImport> next = List();
+    next[(size_t)index] = import.Shown();
+    Remember();
+    std::wstring why;
+    if (Apply(next, why)) {
+        selectAfterReopen_ = index;
+    } else {
+        undo_.pop_back();
+        Status(L"Not baked: " + why);
+    }
+}
+
 void ImportTools::Remember() {
     UndoStep step;
     step.stamp = undo::NextStamp();
@@ -321,6 +380,16 @@ bool ImportTools::UndoLatest() {
     undo_.pop_back();
     dragging_ = false;
     const int selected = Selected();
+    // Only where they are shown changed: nothing to bake.
+    bool sameBake = step.imports.size() == entries_.size();
+    for (size_t i = 0; sameBake && i < entries_.size(); ++i)
+        sameBake = Same(step.imports[i], entries_[i].import);
+    if (sameBake) {
+        for (size_t i = 0; i < entries_.size(); ++i) entries_[i].import = step.imports[i];
+        SaveShown();
+        Status(L"Imported region moved back.");
+        return true;
+    }
     std::wstring why;
     if (Apply(step.imports, why)) {
         selectAfterReopen_ = selected >= 0 && (size_t)selected < step.imports.size() ? selected : -1;
@@ -347,7 +416,7 @@ void ImportTools::Select(int index) {
 }
 
 Vec3 ImportTools::Centre(const io::RegionImport& import, const Entry& entry) const {
-    return import.Transform().TransformPoint({ entry.middle.x, entry.middle.y, 0.0f });
+    return import.ShownTransform().TransformPoint({ entry.middle.x, entry.middle.y, 0.0f });
 }
 
 void ImportTools::Outline(const Mat4& transform, const Entry& e, float z, Vec3 out[4]) const {
@@ -362,7 +431,7 @@ void ImportTools::Outline(const Mat4& transform, const Entry& e, float z, Vec3 o
 
 bool ImportTools::GizmoPivot(Vec3& pivot) {
     const int index = Selected();
-    if (index < 0 || previewKept_ || reopenDue_) return false;
+    if (index < 0 || reopenDue_) return false;
     const Entry& e = entries_[(size_t)index];
     pivot = dragging_ ? dragPivot_ : Centre(e.import, e);
     return true;
@@ -373,6 +442,7 @@ void ImportTools::GizmoChanged(const Mat4& transform, bool done, bool keep) {
     if (index < 0) { dragging_ = false; return; }
     Entry& e = entries_[(size_t)index];
     if (!dragging_) {
+        Remember();
         dragging_ = true;
         dragStart_ = e.import;
         dragPivot_ = Centre(e.import, e);
@@ -383,77 +453,69 @@ void ImportTools::GizmoChanged(const Mat4& transform, bool done, bool keep) {
     // Only the turn about Z: a tilt or a scale has no meaning for a region.
     const float turn = std::atan2(transform.m[0][1] / factor, transform.m[0][0] / factor);
     const Vec3 to{ transform.m[3][0], transform.m[3][1], transform.m[3][2] };
-    SetPoint(to, dragStart_.yawDegrees + turn * 180.0f / kPi, false);
+    const float startYaw = dragStart_.Shown().yawDegrees;
+    SetPoint(to, startYaw + turn * 180.0f / kPi, false);
     if (!done) return;
     if (!keep) {
         e.import = dragStart_;
         dragging_ = false;
-        Renderer().ClearSectionPreview();
-        if (host_.updateProperties) host_.updateProperties();
+        undo_.pop_back();
+        RefreshPreviews();
         return;
     }
-    SetPoint(to, dragStart_.yawDegrees + turn * 180.0f / kPi, true);
+    SetPoint(to, startYaw + turn * 180.0f / kPi, true);
 }
 
 bool ImportTools::GetPoint(Vec3& position, float& heading) {
     const int index = Selected();
-    if (index < 0 || previewKept_ || reopenDue_) return false;
+    if (index < 0 || reopenDue_) return false;
     const Entry& e = entries_[(size_t)index];
     position = Centre(e.import, e);
-    heading = e.import.yawDegrees;
+    heading = e.import.Shown().yawDegrees;
     return true;
 }
 
 bool ImportTools::SetPoint(const Vec3& position, float heading, bool commit) {
     const int index = Selected();
-    if (index < 0 || previewKept_) return false;
+    if (index < 0 || reopenDue_) return false;
     Entry& e = entries_[(size_t)index];
     if (!dragging_) {
+        Remember();
         dragging_ = true;
         dragStart_ = e.import;
         dragPivot_ = Centre(e.import, e);
     }
-    // What is drawn sits where dragStart_ put it: from there, about the
-    // centre, by the turn, to the new centre.
-    const float turn = (heading - dragStart_.yawDegrees) * kPi / 180.0f;
-    const Mat4 delta = Move(dragPivot_ * -1.0f) * TurnZ(turn) * Move(position);
-    const Mat4 placed = dragStart_.Transform() * delta;
-    e.import.yawDegrees = Wrap360(heading);
-    e.import.offset = { placed.m[3][0], placed.m[3][1], placed.m[3][2] };
-    Renderer().SetSectionPreview((u32)e.import.firstLetter * 100, (u32)(e.import.firstLetter + e.letters) * 100,
-                                 delta);
-    if (host_.updateProperties) host_.updateProperties();
+    // Where it was shown as the drag began: from there, about the centre, by
+    // the turn, to the new centre. Only the view follows; the game keeps the
+    // baked place until Bake.
+    const io::RegionImport start = dragStart_.Shown();
+    const float turn = (heading - start.yawDegrees) * kPi / 180.0f;
+    const Mat4 placed = start.Transform() * Move(dragPivot_ * -1.0f) * TurnZ(turn) * Move(position);
+    e.import.shownYaw = Wrap360(heading);
+    e.import.shownOffset = { placed.m[3][0], placed.m[3][1], placed.m[3][2] };
+    const auto closeTo = [](float a, float b) { return std::fabs(a - b) < 0.01f; };
+    const float turnLeft = std::fmod(std::fabs(e.import.shownYaw - e.import.yawDegrees), 360.0f);
+    e.import.moved = !(closeTo(e.import.shownOffset.x, e.import.offset.x) && closeTo(e.import.shownOffset.y, e.import.offset.y) &&
+                       closeTo(e.import.shownOffset.z, e.import.offset.z) && (turnLeft < 0.01f || turnLeft > 359.99f));
+    RefreshPreviews();
     if (!commit) return true;
 
     dragging_ = false;
-    const io::RegionImport moved = e.import;
-    e.import = dragStart_;   // the list as it is on disk, until Apply makes `moved` so
-    if (Same(moved, dragStart_)) {
-        Renderer().ClearSectionPreview();
+    const io::RegionImport now = e.import.Shown(), was = dragStart_.Shown();
+    if (Same(now, was)) {
+        undo_.pop_back();   // nothing moved
         return true;
     }
-    std::vector<io::RegionImport> next;
-    for (const Entry& entry : entries_) next.push_back(entry.import);
-    next[(size_t)index] = moved;
-    Remember();
-    std::wstring why;
-    if (Apply(next, why)) {
-        e.import = moved;
-        previewKept_ = true;   // the view keeps it there until the region reopens
-        selectAfterReopen_ = index;
-    } else {
-        undo_.pop_back();
-        Renderer().ClearSectionPreview();
-        Status(moved.source + L" went back: " + why);
-    }
-    if (host_.updateProperties) host_.updateProperties();
+    SaveShown();
+    Status(e.import.moved ? e.import.source + L" moved in the view only: Bake in its properties puts it in the game there."
+                          : e.import.source + L" is back where the game has it.");
     return true;
 }
 
 bool ImportTools::DeleteSelection() {
     const int index = Selected();
     if (index < 0) return false;
-    if (previewKept_ || reopenDue_) return true;
+    if (reopenDue_) return true;
     std::vector<io::RegionImport> next;
     for (size_t i = 0; i < entries_.size(); ++i)
         if ((int)i != index) next.push_back(entries_[i].import);
@@ -485,8 +547,8 @@ void ImportTools::PopulateTree(SceneTreeBuilder& tree) {
     for (size_t i = 0; i < entries_.size(); ++i) {
         const Entry& e = entries_[i];
         wchar_t label[128];
-        ::swprintf_s(label, L"%s  (sections %d-%d)", e.import.source.c_str(), e.import.firstLetter * 100,
-                     (e.import.firstLetter + e.letters) * 100 - 1);
+        ::swprintf_s(label, L"%s  (sections %d-%d)%s", e.import.source.c_str(), e.import.firstLetter * 100,
+                     (e.import.firstLetter + e.letters) * 100 - 1, e.import.moved ? L"  - moved, not baked" : L"");
         if (!tree.matches(label)) continue;
         tree.insert(root, label, (intptr_t)i);
         ++shown;
@@ -499,8 +561,8 @@ void ImportTools::OnTreeItem(intptr_t code) {
     Select((int)code);
     const Entry& e = entries_[(size_t)code];
     Vec3 corners[4];
-    const float z = e.import.offset.z;
-    Outline(e.import.Transform(), e, z, corners);
+    const float z = e.import.Shown().offset.z;
+    Outline(e.import.ShownTransform(), e, z, corners);
     Aabb box;
     for (const Vec3& c : corners) {
         box.Add({ c.x, c.y, z - 50.0f });
@@ -515,9 +577,10 @@ bool ImportTools::StatusText(std::wstring& text) const {
     const Entry& e = entries_[(size_t)index];
     const Vec3 c = Centre(e.import, e);
     wchar_t buffer[256];
-    ::swprintf_s(buffer, L"Imported region %s: centre (%.0f, %.0f), turned %.1f degrees -- the gizmo moves and turns "
-                         L"it, Delete takes it out",
-                 e.import.source.c_str(), c.x, c.y, e.import.yawDegrees);
+    ::swprintf_s(buffer, L"Imported region %s: centre (%.0f, %.0f), turned %.1f degrees%s -- the gizmo moves and turns "
+                         L"it in the view, Bake (properties) puts it in the game, Delete takes it out",
+                 e.import.source.c_str(), c.x, c.y, e.import.Shown().yawDegrees,
+                 e.import.moved ? L" (moved, not baked)" : L"");
     text = buffer;
     return true;
 }
@@ -541,13 +604,20 @@ bool ImportTools::FillProperties(PropertiesPanel::View& view) {
         view.rows.push_back(std::move(row));
     };
     const Vec3 c = Centre(e.import, e);
-    const wchar_t* place = L"Where the middle of the region stands, in metres. Applying bakes it there and opens the "
-                           L"region again.";
+    const io::RegionImport shown = e.import.Shown();
+    const wchar_t* place = L"Where the middle of the region stands, in metres. In the view only, until Bake.";
     add(L"Placement", L"Centre X", Number(c.x), place, kFieldX, true);
     add(L"Placement", L"Centre Y", Number(c.y), place, kFieldY, true);
-    add(L"Placement", L"Height", Number(e.import.offset.z), L"Raised or lowered as a whole, in metres.", kFieldZ,
-        true);
-    add(L"Placement", L"Turn", Number(e.import.yawDegrees), L"About Z, in degrees.", kFieldTurn, true);
+    add(L"Placement", L"Height", Number(shown.offset.z), L"Raised or lowered as a whole, in metres.", kFieldZ, true);
+    add(L"Placement", L"Turn", Number(shown.yawDegrees), L"About Z, in degrees.", kFieldTurn, true);
+    add(L"Placement", L"In the game", e.import.moved ? L"No: moved since the last bake" : L"Yes, where it is shown",
+        L"The gizmo and these fields move it in the view only. Bake writes it into the game where it is shown "
+        L"(scenery, ground and collision), and the region opens again.", 0, false);
+    view.actions.push_back({ e.import.moved ? L"Bake" : L"Bake (nothing moved)", kBakeCommand, L"Game",
+                             L"Writes the region into the game where it is shown; the region opens again." });
+    if (e.import.moved)
+        view.actions.push_back({ L"Back to the baked place", kRevertCommand, L"Game",
+                                 L"Puts it back in the view where the game has it." });
     wchar_t range[64];
     ::swprintf_s(range, L"%d-%d", e.import.firstLetter * 100, (e.import.firstLetter + e.letters) * 100 - 1);
     add(L"Region", L"Source", e.import.source, L"The game's region it is a copy of.", 0, false);
@@ -562,11 +632,11 @@ bool ImportTools::ApplyProperties() {
     const int index = Selected();
     if (index < 0) return false;
     PropertiesPanel* properties = host_.properties;
-    if (!properties || previewKept_ || reopenDue_) return true;
+    if (!properties || reopenDue_) return true;
     Entry& e = entries_[(size_t)index];
     const Vec3 was = Centre(e.import, e);
     Vec3 centre = was;
-    float turn = e.import.yawDegrees;
+    float turn = e.import.Shown().yawDegrees;
     const auto number = [&](int field, float& into) {
         float value = 0.0f;
         std::wstring text;
@@ -601,14 +671,17 @@ void ImportTools::DrawOverlay(IDirect3DDevice9* device, const Camera& camera, Wo
     device->SetFVF(kLineFvf);
     const int selected = Selected();
     for (size_t i = 0; i < entries_.size(); ++i) {
-        // Only the selected one, and only its outline: the region itself is in
-        // the view (and moves with a drag).
-        if ((int)i != selected) continue;
+        // The selected one, and those moved but not baked: their outlines,
+        // where they are shown (the regions themselves are in the view).
         const Entry& e = entries_[i];
+        if ((int)i != selected && !e.import.moved) continue;
         Vec3 c[4];
-        Outline(e.import.Transform(), e, Centre(e.import, e).z + 2.0f, c);
-        // Orange while part of it stands past the collision range: drawn there, but not driven on.
-        const D3DCOLOR colour = io::InsideCollisionRange(e.centres, e.import) ? 0xFFFFC832 : 0xFFFF8020;
+        Outline(e.import.ShownTransform(), e, Centre(e.import, e).z + 2.0f, c);
+        // Selected: yellow, orange while part of it stands past the collision
+        // range (drawn there, but not driven on). Not selected and not baked: cyan.
+        const D3DCOLOR colour = (int)i != selected                                     ? 0xFF40D0E0
+                                : io::InsideCollisionRange(e.centres, e.import.Shown()) ? 0xFFFFC832
+                                                                                        : 0xFFFF8020;
         const LineVertex outline[5] = {
             { c[0].x, c[0].y, c[0].z, colour }, { c[1].x, c[1].y, c[1].z, colour },
             { c[2].x, c[2].y, c[2].z, colour }, { c[3].x, c[3].y, c[3].z, colour },

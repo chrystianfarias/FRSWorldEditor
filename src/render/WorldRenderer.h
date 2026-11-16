@@ -402,16 +402,18 @@ public:
     // their procedural description instead -- left out of drawing and picking.
     void SetHiddenModels(std::function<bool(const nfs::SolidObject&)> hidden) { hiddenModels_ = std::move(hidden); }
 
-    // A whole imported region seen where the gizmo is taking it (ui/ImportTools):
+    // Whole imported regions seen somewhere they are not baked (ui/ImportTools):
     // the sections numbered [first, last) drawn with `delta` after their own
-    // placement, and never culled while it lasts.
-    void SetSectionPreview(u32 first, u32 last, const Mat4& delta) {
-        previewFirst_ = first;
-        previewLast_ = last;
-        previewDelta_ = delta;
+    // placement, and never culled while it lasts. One per import.
+    struct SectionPreview { u32 first = 0, last = 0; Mat4 delta = Mat4::Identity(); };
+    void SetSectionPreviews(std::vector<SectionPreview> previews) { previews_ = std::move(previews); }
+    void ClearSectionPreview() { previews_.clear(); }
+    // The preview a section is drawn with, or null.
+    const SectionPreview* Previewed(u32 number) const {
+        for (const SectionPreview& p : previews_)
+            if (number >= p.first && number < p.last) return &p;
+        return nullptr;
     }
-    void ClearSectionPreview() { previewFirst_ = previewLast_ = 0; }
-    bool Previewed(u32 number) const { return number >= previewFirst_ && number < previewLast_; }
 
     // What the game itself would draw (drive/world/GameStreaming): when set, a
     // section is drawn only if `section(number)` says so, and a placed model only
@@ -489,8 +491,7 @@ public:
     size_t DuplicateInstances() const { return duplicateInstances_; }
 
 private:
-    u32  previewFirst_ = 0, previewLast_ = 0;
-    Mat4 previewDelta_ = Mat4::Identity();
+    std::vector<SectionPreview> previews_;
 
     // Everything the renderer needs for one streaming section: its own geometry,
     // and the instances it places. Sections with scenery but no geometry of their
