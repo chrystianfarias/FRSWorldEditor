@@ -1868,6 +1868,29 @@ void MainWindow::LaunchGame() {
         if (answer == IDCANCEL) return;
     }
 
+    // Sections an older version wrote with a broken object list crash the
+    // game as soon as it loads them: they are rebuilt by a save, asked first
+    // since a save writes every unsaved edit as well.
+    if (world_) {
+        std::wstring broken;
+        size_t count = 0;
+        for (const auto& section : world_->Loaded())
+            if (section->brokenObjectList && section->info) {
+                if (count++ < 8) broken += (broken.empty() ? L"" : L", ") + Widen(section->info->name);
+            }
+        if (count) {
+            const int answer = ::MessageBoxW(
+                window_,
+                Format(L"%zu section(s) of this world were written by an older version of the editor in a way "
+                       L"that crashes the game (%s).\n\nSave the world now to rebuild them? Saving also "
+                       L"writes any other edit not saved yet.",
+                       count, broken.c_str()).c_str(),
+                kWindowTitle, MB_ICONWARNING | MB_YESNOCANCEL);
+            if (answer == IDCANCEL) return;
+            if (answer == IDYES && !SavePlacements()) return;
+        }
+    }
+
     // What is still only in the editor (roads, terrain) goes into the game's
     // files first, so the game starts with the world as it is edited.
     for (auto& extension : extensions_) extension->OnBeforeLaunch();

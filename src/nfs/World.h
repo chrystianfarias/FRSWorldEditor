@@ -54,6 +54,10 @@ struct LoadedSection {
     // a collision pack as shipped. Saving it again takes the city out.
     bool emptyPending = false;
 
+    // Written by an older version with a broken object list (World.cpp,
+    // BrokenObjectTable): the game crashes on it until it is saved again.
+    bool brokenObjectList = false;
+
     // Collision edited in the editor and not written yet: the packs (indices
     // into `collision`) whose polygons differ from what is on disk.
     bool collisionChanged = false;

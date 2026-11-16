@@ -512,6 +512,7 @@ const LoadedSection* World::LoadSection(const Section& section) {
     // again the way the game reads them.
     if (fromSpan && BrokenObjectTable(buffer)) {
         loadedSection->placementsChanged = true;
+        loadedSection->brokenObjectList = true;
         LOG_WARN("section %s: its object list was written broken by an older version "
                  "(the game crashes at 0x493832); it is rebuilt at the next save", section.name.c_str());
     }
