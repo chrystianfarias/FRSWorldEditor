@@ -295,6 +295,45 @@ void World::Close() {
     bounds_ = {};
 }
 
+// Whether a section's object lists are broken the way the editor up to 0.2.1
+// wrote them: copying a model into a list whose first hash starts with the
+// byte 0x11 (0x0E3EB411 in E25) dropped that byte as filler, so the hash
+// table no longer holds one (hash, 0) pair per object. The game reads the
+// table from the first byte of the chunk, takes hash bytes for model
+// pointers, and crashes the next time a texture pack loads (SPEED2 0x493832).
+// Read raw, without the reader's 0x11 filler removal that caused it.
+static bool BrokenObjectTable(ByteSpan section) {
+    const auto read = [](const u8* at) { u32 v; std::memcpy(&v, at, 4); return v; };
+    const auto walk = [&](const u8* data, size_t size, auto&& each) {
+        for (size_t at = 0; at + 8 <= size;) {
+            const u32 id = read(data + at), length = read(data + at + 4);
+            if (at + 8 + (size_t)length > size) return;
+            each(id, data + at + 8, (size_t)length);
+            at += 8 + (size_t)length;
+        }
+    };
+    bool broken = false;
+    walk(section.data, section.size, [&](u32 id, const u8* pack, size_t packSize) {
+        if (id != kChunkSolidListPack) return;
+        walk(pack, packSize, [&](u32 childId, const u8* header, size_t headerSize) {
+            if (childId != 0x80134001u) return;
+            u32 count = 0;
+            bool haveCount = false, haveTable = false;
+            size_t tableSize = 0;
+            const u8* table = nullptr;
+            walk(header, headerSize, [&](u32 partId, const u8* part, size_t partSize) {
+                if (partId == 0x134002u && partSize >= 0x10) { count = read(part + 0x0C); haveCount = true; }
+                if (partId == 0x134003u) { table = part; tableSize = partSize; haveTable = true; }
+            });
+            if (!haveCount || !haveTable) return;
+            if (tableSize % 8 != 0 || tableSize / 8 != count) { broken = true; return; }
+            for (size_t k = 0; k < count; ++k)
+                if (read(table + k * 8 + 4) != 0) { broken = true; return; }
+        });
+    });
+    return broken;
+}
+
 const LoadedSection* World::LoadSection(const Section& section) {
     const auto& sections = table_.Sections();
     const size_t index = (size_t)(&section - sections.data());
@@ -466,6 +505,15 @@ const LoadedSection* World::LoadSection(const Section& section) {
         } else if (chunk.id == 0xB0300100u) {
             ReadTextureAnimations(chunk);
         }
+    }
+
+    // Written by an older editor with a broken object list: rebuilt from the
+    // shipped bytes and its edits at the next save, which lists the objects
+    // again the way the game reads them.
+    if (fromSpan && BrokenObjectTable(buffer)) {
+        loadedSection->placementsChanged = true;
+        LOG_WARN("section %s: its object list was written broken by an older version "
+                 "(the game crashes at 0x493832); it is rebuilt at the next save", section.name.c_str());
     }
 
     if (IsUnderground1()) {

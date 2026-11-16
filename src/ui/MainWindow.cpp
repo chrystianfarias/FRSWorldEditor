@@ -2753,6 +2753,18 @@ void MainWindow::LoadAllSections() {
     PopulateSectionTree();
 
     LOG_INFO("region loaded: parse %lu ms, upload %lu ms", parseMs, uploadMs);
+    // FRS_SAVE_SELFTEST=1, and only with FRS_GAME_FOLDER (a scratch game
+    // folder, never the player's): saves what the load found to save -- such
+    // as sections an older version wrote broken -- once, then closes.
+    static bool saveTested = false;
+    if (!saveTested && std::getenv("FRS_SAVE_SELFTEST") && std::getenv("FRS_GAME_FOLDER")) {
+        saveTested = true;
+        size_t pending = 0;
+        for (const auto& section : world_->Loaded()) pending += section->placementsChanged;
+        const bool saved = SavePlacements();
+        LOG_INFO("save selftest: %zu sections to save, %s", pending, saved ? "saved" : "FAILED");
+        ::PostMessageW(window_, WM_CLOSE, 0, 0);
+    }
 }
 
 void MainWindow::PopulateSectionTree() {
