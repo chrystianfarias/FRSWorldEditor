@@ -32,6 +32,18 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
         const nfs::Section& entry = *section.info;
         const std::wstring name(entry.name.begin(), entry.name.end());
 
+        // A section with nothing of its own in the stream file -- one an
+        // imported region brought in (io/RegionImport.h): it is made whole
+        // from its source region at every bake of the import, so it holds no
+        // edits of its own. A change that reached it (the copy of new road
+        // collision along its edge) is left out, and the rest is written.
+        if (entry.originalStreamOffset + (u64)entry.originalStreamSize > world.StreamBytes().size) {
+            LOG_WARN("placements %s: an imported region's section takes no edits; its change is left out",
+                     entry.name.c_str());
+            report << name << L": part of an imported region, which takes no edits yet; its change is left out.\n";
+            continue;
+        }
+
         // The edits in force, with the placements replaced by the editor's
         // own list.
         std::vector<SectionEdit> edits;
