@@ -65,6 +65,7 @@ struct Texture {
     float scrollS = 0.0f, scrollT = 0.0f;
 
     u32 baseLevelSize = 0;   // bytes of mip 0
+    ByteSpan header;         // the 124-byte entry as stored
     ByteSpan pixels;         // all mip levels, tightly packed
     ByteSpan palette;        // 256 entries, empty unless the format is palettised
 };

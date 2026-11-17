@@ -10,6 +10,7 @@
 
 #include "ui/RoadsExtension.h"
 #include "nfs/CustomRegions.h"
+#include "nfs/ForeignModels.h"
 
 #include "core/Log.h"
 #include "io/CollisionEdit.h"
@@ -893,6 +894,7 @@ public:
         groundFieldRevision_ = 0;
         meshRevision_ = 0;
         CollectTextureChoices(*world);
+        CollectTextureSwaps(*world);
         LoadNativeOriginals();
         lampOffsets_ = flares::LampOffsets(*world);
         if (!demoDone_ && std::getenv("FRS_CITY_DEMO")) {
@@ -1248,6 +1250,30 @@ public:
     }
 
     void Tick(float deltaSeconds) override {
+        // FRS_U1_ROAD_SELFTEST=1, in a scratch copy of the game folder only
+        // (its path names "scratch"): a 60 m road laid near the free roam's
+        // start and baked, once Underground 2's models (the textures the
+        // first game lacks) are read. The log says what the bake wrote.
+        if (!roadSelfTestDone_ && std::getenv("FRS_U1_ROAD_SELFTEST") && app_.World() &&
+            app_.World()->IsUnderground1() && !nfs::ForeignSources().empty()) {
+            roadSelfTestDone_ = true;
+            if (app_.GameFolder().find(L"scratch") == std::wstring::npos) {
+                LOG_WARN("u1 road self-test: refused, %S is not a scratch folder", app_.GameFolder().c_str());
+            } else {
+                Vec3 a{ 780.0f, -615.0f, 40.0f }, b{ 830.0f, -640.0f, 40.0f };
+                for (Vec3* p : { &a, &b }) {
+                    float ground = 0.0f;
+                    if (app_.View().GroundBelow({ p->x, p->y, p->z }, 0, -1, ground)) p->z = ground + 0.3f;
+                }
+                const u32 na = network_.AddNode(a), nb = network_.AddNode(b);
+                network_.AddSegment(na, nb, lastProfile_);
+                Changed(true);
+                LOG_INFO("u1 road self-test: road (%.1f, %.1f, %.1f) -> (%.1f, %.1f, %.1f), baking", a.x, a.y, a.z,
+                         b.x, b.y, b.z);
+                Bake();
+                LOG_INFO("u1 road self-test: bake returned");
+            }
+        }
         if (demoCameraTicks_ > 0 && --demoCameraTicks_ == 0) {
             Camera look = app_.View().GetCamera();
             look.LookAt(demoEye_, demoCentre_);
@@ -2954,7 +2980,8 @@ private:
     void RebuildTerrain(const terrain::Patch& patch) {
         std::vector<DrawBatch>& list = terrainBatches_[patch.id];
         list.clear();
-        for (const roads::MeshPiece& piece : OpenPortals(terrain_.BuildMesh(patch, &field_, poles_, network_.Lighting())))
+        for (const roads::MeshPiece& piece :
+             ToRegionTextures(OpenPortals(terrain_.BuildMesh(patch, &field_, poles_, network_.Lighting()))))
             AddBatches(piece, kTerrainBit | patch.id, list, *this);
     }
 
@@ -2989,7 +3016,7 @@ private:
         batches_.clear();
         poles_.clear();
         BuildFaceRemainder();
-        const std::vector<roads::MeshPiece> pieces = network_.BuildMesh(&poles_);
+        const std::vector<roads::MeshPiece> pieces = ToRegionTextures(network_.BuildMesh(&poles_));
         PreviewFlares();
         for (const roads::MeshPiece& piece : pieces) {
             for (const roads::MeshGroup& group : piece.groups) {
@@ -4459,6 +4486,46 @@ private:
             if (!app_.View().GetRenderer().GameLook()) ::PostMessageW(root, WM_COMMAND, 44603, 0);
     }
     bool demoDone_ = false;
+    // Need for Speed Underground: the roads' Underground 2 textures it lacks,
+    // drawn and baked with its own (CollectTextureSwaps).
+    std::unordered_map<std::string, std::string> textureSwap_;
+
+    void CollectTextureSwaps(const nfs::World& world) {
+        textureSwap_.clear();
+        if (!world.IsUnderground1()) return;
+        // Its roads carry the markings on the texture's left edge as
+        // Underground 2's lanes do: ROAD_AA the yellow line, ROAD_BA white dashes.
+        static const std::pair<const char*, const char*> kSwaps[] = {
+            { "RDP_LANEA_YS_AA_KT", "RDP_ROAD_AA" },        { "RDP_LANEB_WD_AA_KT", "RDP_ROAD_BA" },
+            { "RDP_LANEB_WS_AA_KT", "RDP_ROAD_BA" },        { "RDP_ROADSTRIP_DRIFT_MA", "RDP_ROADSTRIP_MA" },
+            { "ARC_BARRIERTYPEFWY_WH", "ARC_BARRIERTYPE1" }, { "ARC_FWY_WALL_A", "ARC_CONCRETE2" },
+            { "ARC_CONCRETE_LIGHT2", "ARC_CONCRETE2" },     { "ARC_CONCRETEA_VK", "ARC_CONCRETE" },
+            { "ARC_PILLARCONCRETE", "ARC_PILLARTEXTURE" },  { "RDP_GRAVEL_A_CK", "RDP_DIRT" },
+            { "RDP_INTERSECT_AA_WH", "RDP_RD_INTERSECT_AB" }, { "TRN_GRASSA_KT", "TRN_GRASSC" },
+            { "TRN_OLDTOWNGRASS", "TRN_GRASSC" },           { "TRN_GRASSACLIFFA", "TRN_GRASS" },
+            { "TRN_ROCKCLIFFA_KT", "TRN_SHORELINE_ROCKSA" }, { "TRN_OCEANA_DM", "ANM_WATERA_001" },
+            { "TRN_WATER_SURFACE_A_LL", "ANM_WATERA_001" }, { "ARC_POOL_A_DM", "ANM_WATERA_001" },
+            { "TRN_WATERFALL_A_LL", "TRN_WATERFALL_A" },
+        };
+        std::unordered_set<std::string> own;
+        for (const nfs::Texture* texture : world.AllTextures())
+            if (texture) own.insert(texture->name);
+        for (const auto& [from, to] : kSwaps)
+            if (own.count(to)) textureSwap_[from] = to;
+        LOG_INFO("roads: %zu of Underground 2's road textures drawn with Need for Speed Underground's own",
+                 textureSwap_.size());
+    }
+
+    std::vector<roads::MeshPiece> ToRegionTextures(std::vector<roads::MeshPiece> pieces) const {
+        if (textureSwap_.empty()) return pieces;
+        for (roads::MeshPiece& piece : pieces)
+            for (roads::MeshGroup& group : piece.groups) {
+                const auto found = textureSwap_.find(group.texture);
+                if (found != textureSwap_.end()) group.texture = found->second;
+            }
+        return pieces;
+    }
+    bool roadSelfTestDone_ = false;
     bool demoActive_ = false;
     Vec3 demoEye_, demoCentre_;
     int  demoCameraTicks_ = 0;      // a demo is shown: nothing of the roads or terrain is saved
@@ -6759,6 +6826,12 @@ private:
     bool WriteRoutes(std::wstring& summary) {
         nfs::World* world = app_.World();
         if (!world) return false;
+        // Need for Speed Underground keeps its traffic paths elsewhere, in a
+        // form not read yet: its roads bake without traffic or GPS.
+        if (world->IsUnderground1()) {
+            summary = L"traffic and GPS: not written for Need for Speed Underground yet";
+            return true;
+        }
         const std::wstring region = world->Region();
         const std::wstring shipped = nfs::ShippedTrackFile(app_.GameFolder(), region, L"ROUTES" + region + L"\\RoutesFreeRoam.bin");
         const std::wstring folder = app_.ModelsFolder() + L"\\files\\TRACKS\\ROUTES" + region;
@@ -9835,14 +9908,15 @@ void RoadsExtension::Bake() {
     LOG_INFO("roads: %S", routes.c_str());
     std::vector<roads::Pole> poles;
     progress.Step(L"Building the roads, buildings and ground...");
-    std::vector<roads::MeshPiece> pieces = network_.BuildMesh(&poles);
+    std::vector<roads::MeshPiece> pieces = ToRegionTextures(network_.BuildMesh(&poles));
     // The terrain bakes with the roads: the same prefix, the same removal.
     {
         roads::RoadField field;
         field.Build(network_, [](const roads::Segment& segment) { return !segment.profile.OffGround(); });
         field.AddWaters(network_);
         for (const terrain::Patch& patch : terrain_.Patches())
-            for (roads::MeshPiece& piece : OpenPortals(terrain_.BuildMesh(patch, &field, poles, network_.Lighting())))
+            for (roads::MeshPiece& piece :
+                 ToRegionTextures(OpenPortals(terrain_.BuildMesh(patch, &field, poles, network_.Lighting()))))
                 pieces.push_back(std::move(piece));
     }
 

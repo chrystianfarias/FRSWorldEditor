@@ -1,4 +1,5 @@
 #include "io/SelectionImport.h"
+#include "nfs/ForeignModels.h"
 #include "io/TextureImport.h"
 
 #include "core/Log.h"
@@ -546,6 +547,12 @@ bool BuildReplacement(const nfs::World& world, const std::wstring& objPath, cons
             if (!coming && !TextureVisibleTo(world, hash, loadedIndex)) {
                 NewTexture copy;
                 if (CopyGameTexture(*gameTexture, copy)) {
+                    // Underground 2's (the region lacks it): its alpha usage 2
+                    // with blend 0 is brightness there, see-through in the first
+                    // game -- solid, as Underground 2 draws it.
+                    if (world.IsUnderground1() && nfs::FindForeignTexture(hash) == gameTexture &&
+                        copy.header.size() >= 0x57 && copy.header[0x55] == 2 && copy.header[0x56] == 0)
+                        copy.header[0x55] = 0;
                     LOG_INFO("import: texture %s copied into section %s", gameTexture->name.c_str(),
                              section->name.c_str());
                     newTextures.push_back(std::move(copy));
@@ -685,8 +692,8 @@ void RouteTexturesToLibrary(const nfs::World& world, const nfs::Section& section
 
 // Gives an object chunk a name, hash and header matrix of its own.
 //
-// The name sits at 0xA4 of the header, zero terminated, in whatever room the
-// header leaves; the hash, which is the game's hash of that name, at 0x10; the
+// The name sits at 0xA4 of the header (0x94 in Underground 1's shorter one,
+// version 0x13), zero terminated, in whatever room the header leaves; the hash, which is the game's hash of that name, at 0x10; the
 // storage matrix at 0x40. With `pickName` the name is made to fit and to be
 // unused in the region; otherwise it is kept as given.
 bool RenameObjectChunk(const nfs::World& world, SectionEdit& edit, const Mat4& placement,
@@ -701,12 +708,14 @@ bool RenameObjectChunk(const nfs::World& world, SectionEdit& edit, const Mat4& p
     wrapper.raw = ByteSpan{ edit.chunk.data() + 8, edit.chunk.size() - 8 };
     wrapper.data = wrapper.raw;
     const nfs::Chunk header = nfs::FindChunk(wrapper, nfs::kChunkSolidObjectHeader);
-    if (!header.id || header.data.size < 0xA4 + 8) {
+    const size_t nameAt =
+        header.data.size >= 0x10 && (header.data.read<u32>(0x0C) & 0xFFFFu) <= 0x13 ? 0x94 : 0xA4;
+    if (!header.id || header.data.size < nameAt + 8) {
         why = L"the object it was built from has no header to name it in";
         return false;
     }
     const size_t at = (size_t)(header.data.data - edit.chunk.data());
-    const size_t room = header.data.size - 0xA4;     // terminator included
+    const size_t room = header.data.size - nameAt;   // terminator included
 
     if (pickName) {
         std::string base = name.substr(0, room - 1);
@@ -733,8 +742,8 @@ bool RenameObjectChunk(const nfs::World& world, SectionEdit& edit, const Mat4& p
         for (int column = 0; column < 4; ++column)
             std::memcpy(edit.chunk.data() + at + 0x40 + (size_t)(row * 4 + column) * 4,
                         &placement.m[row][column], 4);
-    std::memset(edit.chunk.data() + at + 0xA4, 0, room);
-    std::memcpy(edit.chunk.data() + at + 0xA4, name.data(), name.size());
+    std::memset(edit.chunk.data() + at + nameAt, 0, room);
+    std::memcpy(edit.chunk.data() + at + nameAt, name.data(), name.size());
 
     edit.kind = SectionEdit::Kind::ModelAdded;
     edit.hash = hash;

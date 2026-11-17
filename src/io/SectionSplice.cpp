@@ -33,7 +33,7 @@ size_t UsedLength(const std::vector<u8>& bytes) {
 
 } // namespace
 
-std::vector<u8> SpliceSection(ByteSpan section, std::vector<ChunkEdit> edits) {
+std::vector<u8> SpliceSection(ByteSpan section, std::vector<ChunkEdit> edits, bool wholeChunks) {
     std::sort(edits.begin(), edits.end(),
               [](const ChunkEdit& a, const ChunkEdit& b) { return a.start < b.start; });
 
@@ -72,6 +72,10 @@ std::vector<u8> SpliceSection(ByteSpan section, std::vector<ChunkEdit> edits) {
         out.resize(std::max(UsedLength(out), section.size), 0);
     if (out.size() < section.size) out.resize(section.size, 0);
     out.resize((size_t)AlignUp(out.size(), 16), 0);
+    if (wholeChunks) {
+        const size_t used = UsedLength(out);
+        if ((out.size() - used) % 8) out.resize(out.size() + 8 - (out.size() - used) % 8, 0);
+    }
     return out;
 }
 

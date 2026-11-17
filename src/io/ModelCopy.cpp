@@ -1,10 +1,13 @@
 #include "io/ModelCopy.h"
+#include "io/U1Convert.h"
 
 #include "core/Log.h"
 #include "nfs/ChunkReader.h"
 #include "nfs/ForeignModels.h"
 #include "nfs/World.h"
 
+#include <mutex>
+#include <unordered_map>
 #include <algorithm>
 #include <cstring>
 
@@ -142,6 +145,24 @@ bool FindModelChunk(const nfs::World& world, u32 hash, ByteSpan& object, u64& fi
         }
         fileOffset = mod128;
         if (packOrder) *packOrder = 0;
+        // Sources hand Underground 2's layout; an Underground 1 region takes
+        // its own (io/U1Convert.h). Kept, so the bytes outlive the call.
+        if (world.IsUnderground1()) {
+            static std::mutex lock;
+            static std::unordered_map<u32, std::vector<u8>> converted;
+            std::lock_guard<std::mutex> guard(lock);
+            auto found = converted.find(hash);
+            if (found == converted.end()) {
+                std::vector<u8> bytes;
+                if (!ConvertU2ObjectToU1(object, fileOffset, bytes, error)) {
+                    LOG_WARN("model %08X from outside the region, for Underground 1: %S", hash, error.c_str());
+                    return false;
+                }
+                found = converted.emplace(hash, std::move(bytes)).first;
+            }
+            object = ByteSpan{ found->second.data(), found->second.size() };
+            fileOffset = 0;
+        }
         return true;
     }
     const nfs::Section& section = *world.Loaded()[home]->info;
@@ -218,10 +239,12 @@ bool CopyGameTexture(const nfs::Texture& source, NewTexture& copy) {
         TextureFromPixels(source.name, bgra, w, h, copy);
         copy.name = source.name;
         copy.hash = source.hash;
+        if (source.header.size >= 124) copy.header.assign(source.header.data, source.header.data + 124);
         return !copy.pixels.empty();
     }
     copy.name   = source.name;
     copy.hash   = source.hash;
+    if (source.header.size >= 124) copy.header.assign(source.header.data, source.header.data + 124);
     copy.width  = source.width;
     copy.height = source.height;
     switch (source.format) {
@@ -267,6 +290,12 @@ std::vector<NewTexture> TexturesToCopy(const nfs::World& world, u32 hash, size_t
                     problem += L"A texture of the model could not be converted. ";
                     continue;
                 }
+                // Alpha usage 2 with blend 0 (+0x55/+0x56): Underground 2 reads
+                // that alpha as brightness and draws the texture solid; the
+                // first game draws it see-through. Solid there too.
+                if (world.IsUnderground1() && foreign->Game() != L"Underground 1" && copy.header.size() >= 0x57 &&
+                    copy.header[0x55] == 2 && copy.header[0x56] == 0)
+                    copy.header[0x55] = 0;
                 if (std::none_of(out.begin(), out.end(), [&](const NewTexture& t) { return t.hash == copy.hash; }))
                     out.push_back(std::move(copy));
                 continue;
@@ -295,6 +324,7 @@ std::vector<NewTexture> TexturesToCopy(const nfs::World& world, u32 hash, size_t
         copy.pixels.assign(source->pixels.data, source->pixels.data + source->pixels.size);
         copy.mipCount = source->mipCount;
         copy.baseLevelSize = source->baseLevelSize;
+        if (source->header.size >= 124) copy.header.assign(source->header.data, source->header.data + 124);
         if (std::none_of(out.begin(), out.end(), [&](const NewTexture& t) { return t.hash == copy.hash; }))
             out.push_back(std::move(copy));
     }

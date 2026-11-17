@@ -18,6 +18,7 @@ constexpr size_t kHeaderU1 = 176, kHeaderU2 = 192;
 constexpr size_t kHeaderNameU1 = 0x94;
 constexpr size_t kMeshHeaderU1 = 64, kMeshHeaderU2 = 68;
 constexpr u32 kHeaderConstantU2 = 0x000EE580;   // +0x88 and +0x8C of every Underground 2 header
+constexpr u32 kHeaderConstantU1 = 0x0012F800;   // the same of every Underground 1 header
 constexpr u32 kSkinnedStride = 60, kPlainStride = 24;
 
 u32 AlignOf(u32 id) {
@@ -187,6 +188,62 @@ bool ConvertU1Object(ByteSpan object, u64 fileOffset, std::vector<u8>& out, std:
         return false;
     }
     ConvertHeader(header->data, meshFlags);
+
+    Writer writer(out);
+    writer.Write(root);
+    return true;
+}
+
+bool ConvertU2ObjectToU1(ByteSpan object, u64 fileOffset, std::vector<u8>& out, std::wstring& error) {
+    out.clear();
+    if (object.size < 8 || Get32(object.data) != kObject) { error = L"That is not a model chunk."; return false; }
+    std::vector<Node> top;
+    if (!Parse(object.data, object.size, fileOffset, top, error)) return false;
+    if (top.size() != 1) { error = L"That is not one model chunk."; return false; }
+    Node& root = top[0];
+
+    // Meshes: the header back to 64 bytes; flags Underground 1's world draws
+    // (0x40, 0x1000) kept, the rest (0x4180 of Underground 2's) dropped.
+    bool meshFlags = false;
+    for (Node& kid : root.kids) {
+        if (kid.id != kMesh) continue;
+        Node* header = Find(kid.kids, kMeshHeader);
+        if (!header || header->data.size() < kMeshHeaderU1) { error = L"A mesh has no header."; return false; }
+        std::vector<u8>& h = header->data;
+        h.resize(kMeshHeaderU1);
+        u32 flags = Get32(h.data() + 0x0C);
+        if (flags & ~0x1040u) flags = 0;
+        Set32(h, 0x0C, flags);
+        if (flags & 0x40) meshFlags = true;
+        if (Node* vertices = Find(kid.kids, kVertices)) {
+            const u32 count = Get32(h.data() + 0x34);
+            const size_t stride = count ? vertices->data.size() / count : 0;
+            if (count && stride != 24 && stride != 36) {
+                error = L"A mesh has vertices of a layout Need for Speed Underground does not draw.";
+                return false;
+            }
+        }
+    }
+
+    Node* header = Find(root.kids, kHeader);
+    if (!header || header->data.size() != kHeaderU2 || header->data[0x0C] != 0x16) {
+        error = L"The model's header is not Need for Speed Underground 2's.";
+        return false;
+    }
+    // 192 -> 176: the sixteen bytes before the name (the box's volume and the
+    // triangles per unit of it) go; version 0x13 and its constant.
+    std::vector<u8>& h = header->data;
+    std::vector<u8> shorter(kHeaderU1, 0);
+    std::memcpy(shorter.data(), h.data(), kHeaderNameU1);
+    std::memcpy(shorter.data() + kHeaderNameU1, h.data() + kHeaderNameU1 + 16, kHeaderU1 - kHeaderNameU1);
+    shorter[0x0C] = 0x13;
+    u16 objectFlags;
+    std::memcpy(&objectFlags, shorter.data() + 0x0E, 2);
+    if (!meshFlags) objectFlags = (u16)(objectFlags & ~0x40);
+    std::memcpy(shorter.data() + 0x0E, &objectFlags, 2);
+    Set32(shorter, 0x88, kHeaderConstantU1);
+    Set32(shorter, 0x8C, kHeaderConstantU1);
+    h = std::move(shorter);
 
     Writer writer(out);
     writer.Write(root);

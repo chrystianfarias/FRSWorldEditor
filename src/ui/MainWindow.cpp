@@ -709,6 +709,7 @@ void MainWindow::OnCreate() {
     extensions_.push_back(CreateRoadsExtension(*this));
     // Need for Speed Underground's models in the library (ui/U1Library.h).
     extensions_.push_back(CreateU1Library(*this));
+    extensions_.push_back(CreateU2Library(*this));
     // The mesh editor (ui/MeshTools.h), asked before the collision tools so
     // that while it edits, Ctrl+Z steps its own edit back.
     {
@@ -3038,6 +3039,75 @@ void MainWindow::OpenRegion(std::wstring region) {
             section->placements.clear();
             section->placementsChanged = false;
         }
+    }
+
+    // FRS_U1_IMPORT_SELFTEST=1: a new object from an OBJ (a box with one of
+    // the region's textures) planned where the first placed object stands,
+    // nothing written; the rebuilt section read back must hold the model,
+    // under its FRS_ name, and its placement, with a valid scenery tree.
+    if (_wgetenv(L"FRS_U1_IMPORT_SELFTEST") && world_ && world_->IsUnderground1()) {
+        wchar_t temp[MAX_PATH] = {};
+        ::GetTempPathW(MAX_PATH, temp);
+        const std::wstring folder = std::wstring(temp) + L"frs-u1-import-selftest";
+        ::CreateDirectoryW(folder.c_str(), nullptr);
+        const std::wstring obj = folder + L"\\box.obj";
+        ::DeleteFileW((folder + L"\\box.json").c_str());
+        Vec3 origin{};
+        for (const auto& section : world_->Loaded()) {
+            if (!section->info || world_->IsLibrary(*section) || section->scenery.instances.empty()) continue;
+            const Mat4& m = section->scenery.instances.front().transform;
+            origin = { m.m[3][0], m.m[3][1], m.m[3][2] };
+            break;
+        }
+        std::string texture = "DEFAULT";
+        for (const nfs::Texture* t : world_->AllTextures())
+            if (t && !t->name.empty()) { texture = t->name; break; }
+        if (FILE* f = nullptr; ::_wfopen_s(&f, obj.c_str(), L"wt") == 0 && f) {
+            std::fprintf(f, "o SelfTestBox\nusemtl %s\n", texture.c_str());
+            for (int i = 0; i < 8; ++i)
+                std::fprintf(f, "v %d %d %d\n", i & 1 ? 2 : -2, i & 2 ? 2 : -2, i & 4 ? 3 : 0);
+            std::fprintf(f, "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n");
+            const int faces[6][4] = { {1,3,4,2}, {5,6,8,7}, {1,2,6,5}, {3,7,8,4}, {1,5,7,3}, {2,4,8,6} };
+            for (const auto& q : faces) std::fprintf(f, "f %d/1 %d/2 %d/3 %d/4\n", q[0], q[1], q[2], q[3]);
+            std::fclose(f);
+        }
+        ImportPlan plan;
+        const bool planned = PlanImport(*world_, obj, plan, &origin);
+        size_t models = 0, placed = 0, bad = 0;
+        for (const SectionSpan& span : plan.sectionSpans) {
+            if (span.layoutFile) continue;
+            const nfs::Section* section = nullptr;
+            for (const auto& loaded : world_->Loaded())
+                if (loaded->info && span.name.find("(section " + loaded->info->name + ")") != std::string::npos)
+                    section = loaded->info;
+            if (!section) continue;
+            std::vector<SectionEdit> found;
+            std::wstring why;
+            bool ok = DiffSectionBytes(*world_, *section, ByteSpan{ span.bytes.data(), span.bytes.size() },
+                                       span.fileOffset, found, why);
+            for (const SectionEdit& e : found) {
+                if (e.kind == SectionEdit::Kind::ModelAdded && e.label.rfind("FRS_", 0) == 0) ++models;
+                else if (e.kind == SectionEdit::Kind::Placement) ++placed;
+                LOG_INFO("u1 import self-test %s: edit kind %d '%s'", section->name.c_str(), (int)e.kind, e.label.c_str());
+            }
+            nfs::ChunkReader reader(ByteSpan{ span.bytes.data(), span.bytes.size() }, span.fileOffset);
+            nfs::Chunk chunk;
+            while (ok && reader.Next(chunk)) {
+                if (chunk.id != nfs::kChunkTrackScenery) continue;
+                std::string invalid;
+                if (!nfs::ValidateScenery(ByteSpan{ chunk.raw.data - 8, chunk.raw.size + 8 }, chunk.headerOffset,
+                                          invalid)) {
+                    ok = false;
+                    LOG_WARN("u1 import self-test %s: %s", section->name.c_str(), invalid.c_str());
+                }
+            }
+            if (!ok) ++bad;
+            LOG_INFO("u1 import self-test %s: %zu bytes %s %S", section->name.c_str(), span.bytes.size(),
+                     ok ? "OK" : "FAILED", why.c_str());
+        }
+        LOG_INFO("u1 import self-test: planned %s, %zu created, %zu FRS_ models and %zu placements read back, "
+                 "%zu sections failed, texture %s; report: %S %S", planned ? "yes" : "NO", plan.created.size(),
+                 models, placed, bad, texture.c_str(), plan.report.c_str(), plan.rebuiltReport.c_str());
     }
 
     // FRS_U1_COLLISION_SELFTEST=1: the collision edit without writing anything

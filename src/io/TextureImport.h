@@ -40,6 +40,12 @@ struct NewTexture {
     // Read from a TGA, the format the editor exports the game's own textures
     // in -- so possibly one of them coming back rather than a new one.
     bool            fromTga = false;
+
+    // A copy of a game texture: its own 124-byte entry, the model for the new
+    // one -- how it blends (+0x55/+0x56), scrolls and the fields not yet
+    // understood go with it instead of coming from whatever texture of the
+    // destination pack shares its format. Empty for a new texture.
+    std::vector<u8> header;
 };
 
 // The hash the game looks a texture up by.

@@ -140,6 +140,14 @@ bool BuildTpkTables(const TpkTables& original, const std::vector<NewTexture>& ad
         const size_t entry = slot * kHeaderEntry;
         u8* header = out.headers.data() + entry;
 
+        // A game texture brings its own entry; the pack's word at 0x28 stays.
+        if (texture.header.size() == kHeaderEntry) {
+            u8 packWord[4];
+            std::memcpy(packWord, header + 0x28, 4);
+            std::memcpy(header, texture.header.data(), kHeaderEntry);
+            std::memcpy(header + 0x28, packWord, 4);
+        }
+
         std::memset(header + kName, 0, kNameCapacity);
         std::memcpy(header + kName, texture.name.c_str(),
                     std::min(texture.name.size(), kNameCapacity - 1));

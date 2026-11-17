@@ -23,7 +23,17 @@ class MainWindow;
 // models read again at every start.
 std::unique_ptr<EditorExtension> CreateU1Library(MainWindow& window);
 
+// The same for Need for Speed Underground 2's city (L4RA, from the folder set
+// for it), read while a region of the first game is open: placed there, a
+// model is converted to that game's layout on save (io/U1Convert.h).
+std::unique_ptr<EditorExtension> CreateU2Library(MainWindow& window);
+
 // Converts every model of the game in `folder` and reads it back as this
 // game's (FRSWorldEditor.exe --u1-selftest <folder>): the result goes to the
 // log. 0 when every model came back the same.
 int RunU1SelfTest(const std::wstring& folder);
+
+// Converts every model of Underground 2's city in `folder` (an Underground 2
+// folder) to the first game's layout and reads it back
+// (FRSWorldEditor.exe --u2-to-u1-selftest <folder>). 0 when all came back the same.
+int RunU2ToU1SelfTest(const std::wstring& folder);

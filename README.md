@@ -34,23 +34,41 @@ If the editor helps you, you can [buy me a coffee](https://buymeacoffee.com/chry
 
 | Feature | Underground | Underground 2 | Most Wanted | Carbon | ProStreet |
 | --- | :---: | :---: | :---: | :---: | :---: |
-| View the world as shipped (geometry, textures, scenery, lighting) | 🚧 | ✅ | 🗓️ | 🗓️ | 🗓️ |
+| View the world as shipped (geometry, textures, scenery, lighting) | ✅ | ✅ | 🗓️ | 🗓️ | 🗓️ |
 | Sky, animated textures, object animations | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Place, move, copy and remove objects | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Mesh editor and OBJ export / import | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Edit in Blender, new objects | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Collision: view, draw, edit, make from meshes | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Roads: draw, junctions, bridges, bake into the game | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
+| Place, move, copy and remove objects | ✅ | ✅ | 🗓️ | 🗓️ | 🗓️ |
+| Mesh editor and OBJ export / import | 🚧 | ✅ | 🗓️ | 🗓️ | 🗓️ |
+| Edit in Blender, new objects | 🚧 | ✅ | 🗓️ | 🗓️ | 🗓️ |
+| Collision: view, draw, edit, make from meshes | ✅ | ✅ | 🗓️ | 🗓️ | 🗓️ |
+| Roads: draw, junctions, bridges, bake into the game | 🚧 | ✅ | 🗓️ | 🗓️ | 🗓️ |
 | Traffic and GPS routes for new roads | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
 | Terrain: new patches, sculpting, fitting to roads | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
 | Visibility zones: view and edit | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
 | Named zones and quick travel | — | ✅ | 🗓️ | 🗓️ | — |
 | Worlds: separate sets of edits, per-edit revert, undo | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Game plugin: edits loaded into the running game | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Launch the game into free roam at the camera | — | ✅ | 🗓️ | 🗓️ | — |
+| Game plugin: edits loaded into the running game | ✅ | ✅ | 🗓️ | 🗓️ | 🗓️ |
+| Launch the game into free roam at the camera | ✅ | ✅ | 🗓️ | 🗓️ | — |
 
-Underground and ProStreet have no free roam: in those games the editor will
-launch into a race instead.
+Underground has no free roam of its own: the editor builds one from the
+region's race tracks, without the races' barriers, and launches the game into
+it. ProStreet has none either: there the editor will launch into a race
+instead.
+
+## What it does (Underground)
+
+- **Its regions open for editing.** Objects are placed, moved, copied and
+  removed as in Underground 2, and saved in Underground's own layout.
+- **Models from both games.** The Library's game filter shows Underground's
+  models and, while an Underground region is open, Underground 2's too:
+  these are converted to Underground's model layout on save, with their
+  textures and blending.
+- **Collision.** Barriers, walls and ground are drawn and edited; reset zones
+  too.
+- **Free roam.** Launch Game drives the region's tracks joined into one free
+  roam, with the race barriers left out and the city's walls kept.
+- **Roads (in progress).** Roads draw and bake with Underground's own road,
+  barrier, grass and water textures. Traffic and GPS routes are not written
+  for Underground yet.
 
 ## What it does (Underground 2)
 

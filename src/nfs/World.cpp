@@ -542,6 +542,20 @@ const LoadedSection* World::LoadSection(const Section& section) {
         }
     }
 
+    // Need for Speed Underground walks a section's chunks until it lands
+    // exactly on its size (0x447AC0); zeros left over that are not whole
+    // 8-byte chunks send it past the end (int3). Rebuilt at the next save.
+    if (fromSpan && IsUnderground1()) {
+        size_t at = 0;
+        while (at + 8 <= buffer.size) at += 8 + (size_t)buffer.read<u32>(at + 4);
+        if (at != buffer.size) {
+            loadedSection->placementsChanged = true;
+            loadedSection->brokenObjectList = true;
+            LOG_WARN("section %s: its chunks do not end on its size (the game stops at 0x447AFB); it is rebuilt "
+                     "at the next save", section.name.c_str());
+        }
+    }
+
     if (fromSpan && BrokenObjectTable(buffer)) {
         loadedSection->placementsChanged = true;
         loadedSection->brokenObjectList = true;

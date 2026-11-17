@@ -124,7 +124,14 @@ bool Split(ByteSpan chunk, u64 fileOffset, Parts& out) {
             // tables start straight after their header, and one shipped tree
             // legitimately begins with a 0x11 byte that a filler check would
             // eat, so they are taken raw.
-            case kSceneryHeader:    out.header    = child.raw;  break;
+            // Underground 1's header carries filler (0x11 words) before its
+            // fields; read past it, the number at +0x0C is the section's.
+            case kSceneryHeader: {
+                out.header = child.raw;
+                while (out.header.size >= 4 && out.header.read<u32>(0) == 0x11111111u)
+                    out.header = out.header.sub(4, out.header.size - 4);
+                break;
+            }
             case kSceneryInfos:     out.infos     = child.raw;  break;
             case kSceneryInstances: out.instances = child.data; break;
             case kSceneryTree:      out.tree      = child.raw;  break;

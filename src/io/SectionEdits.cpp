@@ -650,7 +650,7 @@ bool BuildSection(const nfs::World& world, const nfs::Section& section,
         }
     }
 
-    out = SpliceSection(original, std::move(splices));
+    out = SpliceSection(original, std::move(splices), world.IsUnderground1());
     return true;
 }
 

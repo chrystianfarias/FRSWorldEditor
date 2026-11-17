@@ -28,3 +28,9 @@
 // `fileOffset` in its file. `out` gets the same model as Underground 2 stores
 // it, laid out to start on a 128-byte boundary.
 bool ConvertU1Object(ByteSpan object, u64 fileOffset, std::vector<u8>& out, std::wstring& error);
+
+// The other way: a whole 0x80134010 chunk of Underground 2 (or one already
+// converted to its layout) as Underground 1 stores it -- header 192 -> 176,
+// mesh headers 68 -> 64, flags it does not draw dropped -- laid out to start
+// on a 128-byte boundary.
+bool ConvertU2ObjectToU1(ByteSpan object, u64 fileOffset, std::vector<u8>& out, std::wstring& error);

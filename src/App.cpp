@@ -49,10 +49,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand) {
         int count = 0;
         LPWSTR* args = ::CommandLineToArgvW(::GetCommandLineW(), &count);
         const bool selfTest = args && count >= 3 && ::lstrcmpiW(args[1], L"--u1-selftest") == 0;
-        const std::wstring folder = selfTest ? args[2] : L"";
+        const bool backTest = args && count >= 3 && ::lstrcmpiW(args[1], L"--u2-to-u1-selftest") == 0;
+        const std::wstring folder = selfTest || backTest ? args[2] : L"";
         if (args) ::LocalFree(args);
-        if (selfTest) {
-            const int result = RunU1SelfTest(folder);
+        if (selfTest || backTest) {
+            const int result = selfTest ? RunU1SelfTest(folder) : RunU2ToU1SelfTest(folder);
             ::CoUninitialize();
             return result;
         }

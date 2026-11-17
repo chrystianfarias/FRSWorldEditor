@@ -46,7 +46,13 @@ struct ChunkEdit {
 // chunk lands at a position congruent to `start` modulo 128, so anything
 // inside it that is aligned by file position can be encoded against
 // `sectionFileOffset + start`.
-std::vector<u8> SpliceSection(ByteSpan section, std::vector<ChunkEdit> edits);
+//
+// `wholeChunks`: the zeros after the last chunk are made a whole number of
+// empty 8-byte chunks. Need for Speed Underground walks a section's chunks
+// until it lands exactly on the table's size (0x447AC0): four bytes left
+// over are read as a header, the walk runs past the end into whatever
+// follows, and the first id no loader takes stops the game (int3).
+std::vector<u8> SpliceSection(ByteSpan section, std::vector<ChunkEdit> edits, bool wholeChunks = false);
 
 struct SectionSpanPlan {
     std::vector<SectionSpan>  spans;

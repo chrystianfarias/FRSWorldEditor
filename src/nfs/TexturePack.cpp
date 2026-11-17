@@ -77,6 +77,7 @@ static Texture ReadHeader(ByteSpan entry, ByteSpan format) {
     texture.height        = entry.read<u16>(kTexHeight);
     texture.mipCount      = entry.read<u8>(kTexMipCount);
     texture.baseLevelSize = entry.read<u32>(kTexBaseLevelSize);
+    texture.header        = entry;
     texture.alphaUsage    = (AlphaUsage)std::min<u8>(entry.read<u8>(kTexAlphaUsage), 2);
     texture.alphaBlend    = (AlphaBlend)std::min<u8>(entry.read<u8>(kTexAlphaBlend), 2);
     if (!format.empty()) texture.format = FormatFromFourCc(format.read<u32>(kFormatFourCc));
