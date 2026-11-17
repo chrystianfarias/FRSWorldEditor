@@ -50,6 +50,8 @@ bool IsMostWantedFolder(const std::wstring& folder);
 // The folder of another game whose models join the model library, as the
 // setup stored it ("Underground1", "MostWanted"); empty when there is none.
 std::wstring OtherGameFolder(const wchar_t* game);
+// Whether the folder was ever stored -- an empty one meaning "none".
+bool HasOtherGameFolder(const wchar_t* game);
 void StoreOtherGameFolder(const wchar_t* game, const std::wstring& folder);
 // Where Need for Speed Underground is installed, as far as the registry and
 // the usual places know.

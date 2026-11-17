@@ -203,6 +203,13 @@ private:
     // Reads the folder from the settings: its models in the library when it
     // is the game's, none when it is not set.
     void Reconfigure() {
+        // Never set: the game is taken where it is installed, and kept --
+        // File > Game Folder and Plugins changes it, or empties it for none.
+        if (!HasOtherGameFolder(L"Underground1")) {
+            const std::wstring found = DetectUnderground1Folder();
+            StoreOtherGameFolder(L"Underground1", found);
+            if (!found.empty()) LOG_INFO("U1 library: Need for Speed Underground found in %S", found.c_str());
+        }
         const std::wstring folder = OtherGameFolder(L"Underground1");
         const bool wanted = IsUnderground1Folder(folder);
         if (wanted && folder == folder_ && (enabled_ || loading_)) return;
