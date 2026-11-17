@@ -129,6 +129,10 @@ public:
     Game GameKind() const { return game_; }
     bool IsUnderground1() const { return game_ == Game::Underground1; }
     bool IsMostWanted() const { return game_ == Game::MostWanted; }
+    bool IsCarbon() const { return game_ == Game::Carbon; }
+    // Most Wanted and Carbon: the same section table, visibility lists and
+    // solid layout, nothing of the editor's own written beside them.
+    bool HasMostWantedLayout() const { return game_ == Game::MostWanted || game_ == Game::Carbon; }
     // Only Underground 2's regions can be written: the plugins that hand the
     // game an edit are written for it. The others open to look at and export.
     bool IsReadOnly() const { return game_ != Game::Underground2; }
@@ -137,6 +141,8 @@ public:
 
     // Most Wanted's regions are named after its location, 2: L2RA (Rockport).
     static bool IsMostWantedRegion(const std::wstring& region);
+    // Carbon's, after location 5: L5RA (Palmont City), L5RB (the front end).
+    static bool IsCarbonRegion(const std::wstring& region);
     // An empty region the editor made (nfs/CustomRegions.h): its source's city
     // hidden, and taken out of every section it saves.
     bool EmptyCity() const { return emptyCity_; }

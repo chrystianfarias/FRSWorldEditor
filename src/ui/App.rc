@@ -284,7 +284,7 @@ END
 // ---------------------------------------------------------------------------
 // The setup wizard (ui/SetupWizard.cpp)
 
-IDD_SETUP_FOLDER DIALOGEX 0, 0, 300, 170
+IDD_SETUP_FOLDER DIALOGEX 0, 0, 300, 212
 STYLE DS_SETFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
 FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
@@ -302,8 +302,12 @@ BEGIN
     EDITTEXT        IDC_SETUP_MW_PATH, 0, 122, 236, 14, ES_AUTOHSCROLL
     PUSHBUTTON      "Browse...", IDC_SETUP_MW_BROWSE, 242, 121, 58, 16
     LTEXT           "", IDC_SETUP_MW_STATUS, 0, 138, 300, 10
-    LTEXT           "&Edit the worlds of:", -1, 0, 156, 70, 10
-    COMBOBOX        IDC_SETUP_MAIN, 72, 154, 228, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Need for Speed &Carbon", -1, 0, 153, 236, 10
+    EDITTEXT        IDC_SETUP_C_PATH, 0, 164, 236, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_SETUP_C_BROWSE, 242, 163, 58, 16
+    LTEXT           "", IDC_SETUP_C_STATUS, 0, 180, 300, 10
+    LTEXT           "&Edit the worlds of:", -1, 0, 198, 70, 10
+    COMBOBOX        IDC_SETUP_MAIN, 72, 196, 228, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 END
 
 IDD_SETUP_PARTS DIALOGEX 0, 0, 300, 170

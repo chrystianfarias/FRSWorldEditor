@@ -354,7 +354,7 @@ void Stay(HWND dialog) { ::SetWindowLongPtrW(dialog, DWLP_MSGRESULT, -1); }
 // ---- page 1: the games
 
 // The games the editor knows, one row each on the page.
-enum GameRow { kRowUnderground2, kRowUnderground1, kRowMostWanted, kRows };
+enum GameRow { kRowUnderground2, kRowUnderground1, kRowMostWanted, kRowCarbon, kRows };
 
 struct RowControls { int path, browse, status; const wchar_t* name; const wchar_t* browseTitle; };
 const RowControls kRowControls[kRows] = {
@@ -364,12 +364,15 @@ const RowControls kRowControls[kRows] = {
       L"Need for Speed Underground's folder (speed.exe)" },
     { IDC_SETUP_MW_PATH, IDC_SETUP_MW_BROWSE, IDC_SETUP_MW_STATUS, L"Need for Speed Most Wanted",
       L"Need for Speed Most Wanted's folder (speed.exe)" },
+    { IDC_SETUP_C_PATH, IDC_SETUP_C_BROWSE, IDC_SETUP_C_STATUS, L"Need for Speed Carbon",
+      L"Need for Speed Carbon's folder (NFSC.exe)" },
 };
 
 bool RowValid(int row, const std::wstring& folder) {
     switch (row) {
         case kRowUnderground2: return IsGameFolder(folder) && FileExists(folder + L"\\SPEED2.EXE");
         case kRowUnderground1: return IsUnderground1Folder(folder);
+        case kRowCarbon:       return IsCarbonFolder(folder);
         default:               return IsMostWantedFolder(folder);
     }
 }
@@ -381,11 +384,13 @@ std::wstring DescribeRow(int row, const std::wstring& folder) {
         switch (row) {
             case kRowUnderground2: return L"Not this game's folder: SPEED2.EXE and TRACKS are not both here.";
             case kRowUnderground1: return L"Not this game's folder: speed.exe and TRACKS are not both here.";
+            case kRowCarbon:       return L"Not this game's folder: NFSC.exe and TRACKS\\L5RA.BUN are not both here.";
             default:               return L"Not this game's folder: speed.exe and TRACKS\\L2RA.BUN are not both here.";
         }
     }
     if (row == kRowUnderground1) return L"Found. Its models are in the library; its worlds open to look at and export.";
-    if (row == kRowMostWanted) return L"Found. Its models are in the library; its worlds open to look at and export.";
+    if (row == kRowMostWanted || row == kRowCarbon)
+        return L"Found. Its models are in the library; its worlds open to look at and export.";
     std::wstring text = SupportedExecutable(folder) ? L"Found, v1.2." : L"Found, not v1.2: the plugins leave it alone.";
     std::vector<std::wstring> present;
     if (WorldLoaderInstalled(folder)) present.push_back(L"FRS World Loader");
@@ -471,8 +476,10 @@ INT_PTR CALLBACK FolderPage(HWND dialog, UINT message, WPARAM wParam, LPARAM lPa
             SetText(dialog, IDC_SETUP_PATH, c.underground2Folder);
             SetText(dialog, IDC_SETUP_U1_PATH, c.underground1Folder);
             SetText(dialog, IDC_SETUP_MW_PATH, c.mostWantedFolder);
+            SetText(dialog, IDC_SETUP_C_PATH, c.carbonFolder);
             // The game edited until now stays the one chosen.
-            const int main = IsMostWantedFolder(c.folder)     ? kRowMostWanted
+            const int main = IsCarbonFolder(c.folder)         ? kRowCarbon
+                             : IsMostWantedFolder(c.folder)   ? kRowMostWanted
                              : IsUnderground1Folder(c.folder) ? kRowUnderground1
                                                               : kRowUnderground2;
             ::SetPropW(dialog, L"FRSMainRow", (HANDLE)(INT_PTR)(main + 1));
@@ -498,9 +505,10 @@ INT_PTR CALLBACK FolderPage(HWND dialog, UINT message, WPARAM wParam, LPARAM lPa
                     c.underground2Folder = Trimmed(TextOf(dialog, IDC_SETUP_PATH));
                     c.underground1Folder = Trimmed(TextOf(dialog, IDC_SETUP_U1_PATH));
                     c.mostWantedFolder = Trimmed(TextOf(dialog, IDC_SETUP_MW_PATH));
+                    c.carbonFolder = Trimmed(TextOf(dialog, IDC_SETUP_C_PATH));
                     const int main = MainRow(dialog);
                     const std::wstring* folders[kRows] = { &c.underground2Folder, &c.underground1Folder,
-                                                           &c.mostWantedFolder };
+                                                           &c.mostWantedFolder, &c.carbonFolder };
                     bool wrong = main < 0;
                     for (int row = 0; row < kRows; ++row)
                         if (!folders[row]->empty() && !RowValid(row, *folders[row])) wrong = true;
@@ -665,12 +673,17 @@ PROPSHEETPAGEW Page(HINSTANCE instance, int templateId, DLGPROC procedure, const
 
 bool IsGameFolder(const std::wstring& folder) {
     return !folder.empty() && DirectoryExists(folder + L"\\TRACKS") &&
-           (FileExists(folder + L"\\SPEED2.EXE") || FileExists(folder + L"\\speed.exe"));
+           (FileExists(folder + L"\\SPEED2.EXE") || FileExists(folder + L"\\speed.exe") ||
+            FileExists(folder + L"\\NFSC.exe"));
 }
 
 bool IsUnderground1Folder(const std::wstring& folder) {
     return !folder.empty() && !FileExists(folder + L"\\SPEED2.EXE") && FileExists(folder + L"\\speed.exe") &&
            DirectoryExists(folder + L"\\TRACKS") && !IsMostWantedFolder(folder);
+}
+
+bool IsCarbonFolder(const std::wstring& folder) {
+    return !folder.empty() && FileExists(folder + L"\\NFSC.exe") && FileExists(folder + L"\\TRACKS\\L5RA.BUN");
 }
 
 bool IsMostWantedFolder(const std::wstring& folder) {
@@ -762,6 +775,37 @@ std::wstring DetectMostWantedFolder() {
     return {};
 }
 
+std::wstring DetectCarbonFolder() {
+    const wchar_t* keys[] = { L"SOFTWARE\\EA GAMES\\Need for Speed Carbon",
+                              L"SOFTWARE\\Electronic Arts\\Need for Speed Carbon" };
+    for (HKEY root : { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER })
+        for (const wchar_t* key : keys)
+            for (DWORD view : { (DWORD)KEY_WOW64_32KEY, (DWORD)KEY_WOW64_64KEY })
+                for (const wchar_t* value : { L"Install Dir", L"InstallDir", L"Install Path" }) {
+                    wchar_t path[MAX_PATH] = {};
+                    DWORD size = sizeof(path);
+                    if (::RegGetValueW(root, key, value, RRF_RT_REG_SZ | view, nullptr, path, &size) == ERROR_SUCCESS) {
+                        std::wstring folder = Trimmed(path);
+                        while (!folder.empty() && folder.back() == L'\\') folder.pop_back();
+                        if (IsCarbonFolder(folder)) return folder;
+                    }
+                }
+    wchar_t buffer[MAX_PATH] = {};
+    std::vector<std::wstring> candidates;
+    for (const wchar_t* variable : { L"ProgramFiles(x86)", L"ProgramFiles" })
+        if (::GetEnvironmentVariableW(variable, buffer, MAX_PATH))
+            for (const wchar_t* tail : { L"\\EA GAMES\\Need for Speed Carbon", L"\\Need for Speed Carbon" })
+                candidates.push_back(std::wstring(buffer) + tail);
+    for (wchar_t drive = L'C'; drive <= L'H'; ++drive)
+        for (const wchar_t* tail : { L":\\Games\\Need for Speed Carbon Collectors Edition",
+                                     L":\\Games\\Need for Speed Carbon", L":\\Games\\NFS Carbon",
+                                     L":\\Games\\NFSC", L":\\NFSC" })
+            candidates.push_back(std::wstring(1, drive) + tail);
+    for (const std::wstring& folder : candidates)
+        if (IsCarbonFolder(folder)) return folder;
+    return {};
+}
+
 std::wstring DetectGameFolder() {
     // The installer's own record, in either view of the registry.
     const wchar_t* keys[] = { L"SOFTWARE\\EA GAMES\\Need for Speed Underground 2",
@@ -807,7 +851,7 @@ bool RunSetupWizard(HINSTANCE instance, HWND owner, std::wstring& folder) {
     // Every game's folder: the one edited, else as stored, else found -- the
     // first time, the games installed are proposed.
     SetupChoices& c = wizard.choices;
-    const bool otherGame = IsUnderground1Folder(c.folder) || IsMostWantedFolder(c.folder);
+    const bool otherGame = IsUnderground1Folder(c.folder) || IsMostWantedFolder(c.folder) || IsCarbonFolder(c.folder);
     c.underground2Folder = otherGame ? OtherGameFolder(L"Underground2") : c.folder;
     if (c.underground2Folder.empty() && !HasOtherGameFolder(L"Underground2")) c.underground2Folder = DetectGameFolder();
     c.underground1Folder = IsUnderground1Folder(c.folder) ? c.folder : OtherGameFolder(L"Underground1");
@@ -816,6 +860,8 @@ bool RunSetupWizard(HINSTANCE instance, HWND owner, std::wstring& folder) {
     c.mostWantedFolder = IsMostWantedFolder(c.folder) ? c.folder : OtherGameFolder(L"MostWanted");
     if (c.mostWantedFolder.empty() && !HasOtherGameFolder(L"MostWanted"))
         c.mostWantedFolder = DetectMostWantedFolder();
+    c.carbonFolder = IsCarbonFolder(c.folder) ? c.folder : OtherGameFolder(L"Carbon");
+    if (c.carbonFolder.empty() && !HasOtherGameFolder(L"Carbon")) c.carbonFolder = DetectCarbonFolder();
 
     PROPSHEETPAGEW pages[] = {
         Page(instance, IDD_SETUP_FOLDER, FolderPage, L"Your games", &wizard),
@@ -841,6 +887,7 @@ bool RunSetupWizard(HINSTANCE instance, HWND owner, std::wstring& folder) {
     StoreOtherGameFolder(L"Underground2", wizard.choices.underground2Folder);
     StoreOtherGameFolder(L"Underground1", wizard.choices.underground1Folder);
     StoreOtherGameFolder(L"MostWanted", wizard.choices.mostWantedFolder);
+    StoreOtherGameFolder(L"Carbon", wizard.choices.carbonFolder);
     return true;
 }
 

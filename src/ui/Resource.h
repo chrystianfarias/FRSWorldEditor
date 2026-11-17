@@ -174,6 +174,9 @@
 #define IDC_SETUP_U1_STATUS    2717
 #define IDC_SETUP_MW_STATUS    2718
 #define IDC_SETUP_MAIN         2719
+#define IDC_SETUP_C_PATH       2720
+#define IDC_SETUP_C_BROWSE     2721
+#define IDC_SETUP_C_STATUS     2722
 
 // Worlds (sets of edits)
 #define IDD_NEW_WORLD          270

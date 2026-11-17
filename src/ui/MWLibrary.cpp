@@ -44,17 +44,31 @@ struct MWLibraryAccess {
 namespace {
 
 
-const wchar_t kGame[] = L"Most Wanted";
+// What tells the games read this way apart.
+struct GameSpec {
+    const wchar_t* game;        // the Library's Game filter: "Most Wanted"
+    const wchar_t* fullName;    // "Need for Speed Most Wanted"
+    const wchar_t* folderKey;   // OtherGameFolder's name: "MostWanted"
+    const char* log;            // "MW library"
+    const wchar_t* region;      // the city's region
+    nfs::Game kind;
+    std::wstring (*detect)();
+    bool (*valid)(const std::wstring&);
+};
 
-// Most Wanted has one region, Rockport.
-const wchar_t* const kRegions[] = { L"L2RA" };
+// Most Wanted has one region, Rockport; Carbon's city is Palmont (its L5RB is
+// the front end).
+const GameSpec kMostWanted{ L"Most Wanted", L"Need for Speed Most Wanted", L"MostWanted", "MW library", L"L2RA",
+                            nfs::Game::MostWanted, DetectMostWantedFolder, IsMostWantedFolder };
+const GameSpec kCarbon{ L"Carbon", L"Need for Speed Carbon", L"Carbon", "Carbon library", L"L5RA",
+                        nfs::Game::Carbon, DetectCarbonFolder, IsCarbonFolder };
 
 std::wstring Widen(const std::string& text) { return std::wstring(text.begin(), text.end()); }
 
 // The extension itself.
 class MWLibrary final : public EditorExtension, public RenderExtension, public nfs::ForeignModels {
 public:
-    explicit MWLibrary(MainWindow& window) : app_(window) {}
+    MWLibrary(MainWindow& window, const GameSpec& spec) : app_(window), spec_(spec) {}
 
     ~MWLibrary() override {
         nfs::RemoveForeignModels(this);
@@ -89,9 +103,9 @@ public:
         app_.Catalog().Refresh();
         if (nfs::World* world = app_.World()) app_.Renderer().RebuildInstances(*world);
         app_.Status(models_.empty()
-                        ? L"No models were read from Need for Speed Most Wanted's folder; the log has why."
-                        : L"Need for Speed Most Wanted: " + std::to_wstring(models_.size()) +
-                              L" models in the library (Game filter: Most Wanted).");
+                        ? L"No models were read from " + std::wstring(spec_.fullName) + L"'s folder; the log has why."
+                        : std::wstring(spec_.fullName) + L": " + std::to_wstring(models_.size()) +
+                              L" models in the library (Game filter: " + spec_.game + L").");
     }
 
     void OnRegionLoaded() override {
@@ -137,7 +151,7 @@ public:
         for (const auto& [hash, entry] : models_) out.push_back(entry.model);
     }
 
-    std::wstring Game() const override { return kGame; }
+    std::wstring Game() const override { return spec_.game; }
 
     const nfs::SolidObject* FindModel(u32 hash) const override {
         const auto found = models_.find(hash);
@@ -152,7 +166,7 @@ public:
 
     bool ModelChunk(u32 hash, ByteSpan& chunk, u32& mod128, std::wstring& error) const override {
         const auto found = models_.find(hash);
-        if (found == models_.end()) { error = L"not one of Need for Speed Most Wanted's models"; return false; }
+        if (found == models_.end()) { error = L"not one of " + std::wstring(spec_.fullName) + L"'s models"; return false; }
         auto converted = converted_.find(hash);
         if (converted == converted_.end()) {
             ByteSpan object;
@@ -162,9 +176,9 @@ public:
                 return false;
             }
             std::vector<u8> bytes;
-            if (!ConvertMWObject(object, offset, bytes, error)) return false;
+            if (!ConvertMWObject(object, offset, bytes, error, spec_.kind)) return false;
             converted = converted_.emplace(hash, std::move(bytes)).first;
-            LOG_INFO("MW library: %s converted (%zu -> %zu bytes)", found->second.model->name.c_str(), object.size,
+            LOG_INFO("%s: %s converted (%zu -> %zu bytes)", spec_.log, found->second.model->name.c_str(), object.size,
                      converted->second.size());
         }
         chunk = ByteSpan{ converted->second.data(), converted->second.size() };
@@ -205,23 +219,23 @@ private:
     void Reconfigure() {
         // Never set: the game is taken where it is installed, and kept --
         // File > Game Folder and Plugins changes it, or empties it for none.
-        if (!HasOtherGameFolder(L"MostWanted")) {
-            const std::wstring found = DetectMostWantedFolder();
-            StoreOtherGameFolder(L"MostWanted", found);
-            if (!found.empty()) LOG_INFO("MW library: Need for Speed Most Wanted found in %S", found.c_str());
+        if (!HasOtherGameFolder(spec_.folderKey)) {
+            const std::wstring found = spec_.detect();
+            StoreOtherGameFolder(spec_.folderKey, found);
+            if (!found.empty()) LOG_INFO("%s: %S found in %S", spec_.log, spec_.fullName, found.c_str());
         }
-        const std::wstring folder = OtherGameFolder(L"MostWanted");
-        const bool wanted = IsMostWantedFolder(folder);
+        const std::wstring folder = OtherGameFolder(spec_.folderKey);
+        const bool wanted = spec_.valid(folder);
         if (wanted && folder == folder_ && (enabled_ || loading_)) return;
         if (!wanted && !enabled_) { folder_ = folder; return; }
         if (enabled_) {
             if (PlacedButNotSaved()) {
-                app_.Status(L"Objects placed from Need for Speed Most Wanted are not saved yet: its models stay in "
-                            L"the library until the next start.");
+                app_.Status(L"Objects placed from " + std::wstring(spec_.fullName) +
+                            L" are not saved yet: its models stay in the library until the next start.");
                 return;
             }
             Unload();
-            if (!wanted) app_.Status(L"Need for Speed Most Wanted's models are out of the library.");
+            if (!wanted) app_.Status(std::wstring(spec_.fullName) + L"'s models are out of the library.");
         }
         folder_ = folder;
         if (wanted) StartLoading();
@@ -232,18 +246,18 @@ private:
         enabled_ = true;
         loading_ = true;
         done_ = false;
-        app_.Status(L"Reading Need for Speed Most Wanted's models from " + folder_ + L"...");
+        app_.Status(L"Reading " + std::wstring(spec_.fullName) + L"'s models from " + folder_ + L"...");
         const std::wstring tracks = folder_ + L"\\TRACKS";
         loader_ = std::thread([this, tracks] {
             std::vector<std::unique_ptr<nfs::World>> worlds;
             std::vector<std::wstring> regions;
-            for (const wchar_t* region : kRegions) {
+            for (const wchar_t* region : { spec_.region }) {
                 if (::GetFileAttributesW((tracks + L"\\STREAM" + region + L".BUN").c_str()) == INVALID_FILE_ATTRIBUTES)
                     continue;
                 auto world = std::make_unique<nfs::World>();
                 world->SetForeignLookup(false);
                 if (!world->Open(tracks, region)) {
-                    LOG_WARN("MW library: %S could not be opened", region);
+                    LOG_WARN("%s: %S could not be opened", spec_.log, region);
                     continue;
                 }
                 world->LoadAllSections();
@@ -270,12 +284,12 @@ private:
                 Entry entry;
                 entry.world = w;
                 entry.model = model;
-                entry.origin = std::wstring(kGame) + L", " + regions_[w] +
+                entry.origin = std::wstring(spec_.game) + L", " + regions_[w] +
                                (section && section->info ? L" " + Widen(section->info->name) : std::wstring());
                 models_.emplace(model->hash, std::move(entry));
             }
         }
-        LOG_INFO("MW library: %zu models from %zu regions (%zu sky and backdrop pieces left out)", models_.size(),
+        LOG_INFO("%s: %zu models from %zu regions (%zu sky and backdrop pieces left out)", spec_.log, models_.size(),
                  worlds_.size(), backdrops);
     }
 
@@ -308,6 +322,7 @@ private:
     }
 
     MWLibraryAccess app_;
+    const GameSpec& spec_;
     std::wstring folder_;
     bool enabled_ = false, loading_ = false;
 
@@ -327,5 +342,9 @@ private:
 } // namespace
 
 std::unique_ptr<EditorExtension> CreateMWLibrary(MainWindow& window) {
-    return std::make_unique<MWLibrary>(window);
+    return std::make_unique<MWLibrary>(window, kMostWanted);
+}
+
+std::unique_ptr<EditorExtension> CreateCarbonLibrary(MainWindow& window) {
+    return std::make_unique<MWLibrary>(window, kCarbon);
 }

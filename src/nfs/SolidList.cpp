@@ -76,7 +76,7 @@ void ParseHeader(ByteSpan data, SolidObject& out, Game game) {
     out.bounds.min = ReadVec3(data, kHdrBoundsMin);
     out.bounds.max = ReadVec3(data, kHdrBoundsMax);
     out.transform  = ReadMat4(data, kHdrTransform);
-    out.name       = ReadName(data, game == Game::MostWanted ? kHdrNameMW
+    out.name       = ReadName(data, game == Game::MostWanted || game == Game::Carbon ? kHdrNameMW
                                     : (out.version & 0xFFFFu) <= kHdrVersionU1 ? kHdrNameU1 : kHdrName);
     out.kind       = ClassifyObject(out.name);
 }
@@ -168,13 +168,23 @@ void ParseIndices(ByteSpan data, u32 triangleCount, SolidObject& out) {
 // The vertex buffers (0x00134B01, one chunk each) follow the effect: a new one
 // starts each time the effect changes from one material to the next, and the
 // indices of a material count from the start of its own buffer.
-constexpr size_t kMaterialEntrySizeMW = 0x68;
-constexpr size_t kMatTexturesMW       = 0x18;
-constexpr size_t kMatEffectMW         = 0x30;
-constexpr size_t kMatFlagsMW          = 0x38;
-constexpr size_t kMatVertexCountMW    = 0x3C;
-constexpr size_t kMatFirstIndexMW     = 0x44;
-constexpr size_t kMatIndexCountMW     = 0x5C;
+//
+// Carbon keeps all of it with a 0x90-byte material: the vertex count at 0x40,
+// the first index at 0x64, the index count at 0x7C (NFSC.exe; the ProStreet
+// FreeRoam converter's c2ps_solid.py reads them the same way).
+struct MaterialLayout {
+    size_t size, textures, effect, flags, vertexCount, firstIndex, indexCount;
+};
+constexpr MaterialLayout kMaterialMW     { 0x68, 0x18, 0x30, 0x38, 0x3C, 0x44, 0x5C };
+constexpr MaterialLayout kMaterialCarbon { 0x90, 0x18, 0x30, 0x38, 0x40, 0x64, 0x7C };
+
+// Where a vertex keeps what the editor draws with; normal < 0: none (it
+// faces up).
+struct VertexLayout {
+    u32 stride;
+    int normal;
+    u32 color, uv;
+};
 
 // speed.exe's effect table (0x8F9B60): the vertex size of each effect the
 // world uses. 0 WORLD, 1 WORLDREFLECT, 3 WORLDNORMALMAP, 5 GLOSSYWINDOW,
@@ -189,7 +199,37 @@ u32 EffectStrideMW(u32 effect) {
     }
 }
 
-bool ParseMeshMW(const Chunk& mesh, SolidObject& out) {
+VertexLayout EffectLayoutMW(u32 effect) {
+    const u32 stride = EffectStrideMW(effect);
+    if (stride && stride < 36) return { stride, -1, 12, 16 };
+    return { stride, 12, 24, 28 };
+}
+
+// NFSC.exe's effect table (0xA64008, 0x90 bytes an effect: its name, then the
+// vertex elements in buffer order).
+VertexLayout EffectLayoutCarbon(u32 effect) {
+    switch (effect) {
+        case 0: case 17: case 18: return { 36, 12, 24, 28 };   // WorldShader: pos normal colour uv
+        case 1: case 3:           return { 52, 12, 24, 28 };   // WorldReflect, WorldNormalMap: + tangent
+        case 20:                  return { 60, 12, 24, 28 };   // NormalMapNoFog: + uv1, tangent
+        case 2:                   return { 72, 12, 24, 28 };   // WorldBone: + bones
+        case 4: case 28:          return { 48, 12, 24, 28 };   // CarShader, GHOSTCAR: + tangent
+        case 5:                   return { 48, 24, 20, 12 };   // CARNORMALMAP: pos uv colour normal tangent
+        case 25:                  return { 36, 24, 20, 12 };   // GLASS_REFLECT: pos uv colour normal
+        case 26:                  return { 36, 24, 12, 16 };   // WATER: pos colour uv normal
+        case 6: case 13:          return { 24, -1, 12, 16 };   // WorldMin, WorldPrelit: pos colour uv
+        case 15:                  return { 44, 12, 24, 28 };   // skyshader: + uv1
+        default:                  return { 0, 12, 24, 28 };
+    }
+}
+
+bool ParseMeshMW(const Chunk& mesh, SolidObject& out, Game game) {
+    const bool carbon = game == Game::Carbon;
+    const MaterialLayout& layout = carbon ? kMaterialCarbon : kMaterialMW;
+    const size_t kMaterialEntrySizeMW = layout.size;
+    const size_t kMatTexturesMW = layout.textures, kMatEffectMW = layout.effect, kMatFlagsMW = layout.flags,
+                 kMatVertexCountMW = layout.vertexCount, kMatFirstIndexMW = layout.firstIndex,
+                 kMatIndexCountMW = layout.indexCount;
     ByteSpan materialData, indexData;
     std::vector<ByteSpan> buffers;
     ChunkReader reader = ChunkReader::Children(mesh);
@@ -198,7 +238,9 @@ bool ParseMeshMW(const Chunk& mesh, SolidObject& out) {
         switch (part.id) {
             case kChunkMeshMaterials: materialData = part.data; break;
             case kChunkMeshIndices:   indexData = part.data; break;
-            case kChunkMeshVertices:  buffers.push_back(part.data); break;
+            // Carbon aligns some buffers to 16 bytes, not 128: the filler the
+            // reader looked for is not there, and is cut below instead.
+            case kChunkMeshVertices:  buffers.push_back(carbon ? part.raw : part.data); break;
             default: break;
         }
     }
@@ -222,21 +264,35 @@ bool ParseMeshMW(const Chunk& mesh, SolidObject& out) {
     // Every buffer widened into the one vertex array, each run's start kept.
     std::vector<u32> runBase;
     for (size_t r = 0; r < runs.size(); ++r) {
-        u32 stride = EffectStrideMW(runs[r].effect);
-        if (runs[r].vertices && (!stride || (size_t)stride * runs[r].vertices > buffers[r].size))
+        VertexLayout vertexLayout = carbon ? EffectLayoutCarbon(runs[r].effect) : EffectLayoutMW(runs[r].effect);
+        u32& stride = vertexLayout.stride;
+        if (carbon && runs[r].vertices && stride && (size_t)stride * runs[r].vertices <= buffers[r].size) {
+            // The data ends the chunk; what is before it must be filler.
+            const size_t lead = buffers[r].size - (size_t)stride * runs[r].vertices;
+            bool filler = true;
+            for (size_t k = 0; k < lead && filler; ++k) filler = buffers[r].data[k] == 0x11;
+            if (!filler) {
+                LOG_WARN("object '%s': %zu bytes before vertex buffer %zu are not filler", out.name.c_str(), lead, r);
+                return false;
+            }
+            buffers[r] = buffers[r].sub(lead, buffers[r].size - lead);
+        }
+        if (runs[r].vertices && (!stride || (size_t)stride * runs[r].vertices > buffers[r].size)) {
             stride = (u32)(buffers[r].size / runs[r].vertices);
+            vertexLayout = stride >= 36 ? VertexLayout{ stride, 12, 24, 28 } : VertexLayout{ stride, -1, 12, 16 };
+        }
         if (runs[r].vertices && stride < 24) {
             LOG_WARN("object '%s': effect %u with a %u-byte vertex", out.name.c_str(), runs[r].effect, stride);
             return false;
         }
-        const bool hasNormal = stride >= 36;
-        const size_t colorOffset = hasNormal ? 24 : 12, uvOffset = hasNormal ? 28 : 16;
+        const bool hasNormal = vertexLayout.normal >= 0;
+        const size_t colorOffset = vertexLayout.color, uvOffset = vertexLayout.uv;
         runBase.push_back((u32)out.vertices.size());
         for (u32 v = 0; v < runs[r].vertices; ++v) {
             const ByteSpan source = buffers[r].sub((size_t)v * stride, stride);
             SolidVertex vertex;
             vertex.position = ReadVec3(source, 0);
-            vertex.normal   = hasNormal ? ReadVec3(source, 12) : Vec3{ 0.0f, 0.0f, 1.0f };
+            vertex.normal   = hasNormal ? ReadVec3(source, (size_t)vertexLayout.normal) : Vec3{ 0.0f, 0.0f, 1.0f };
             vertex.color    = source.read<u32>(colorOffset);
             vertex.uv       = { source.read<float>(uvOffset), source.read<float>(uvOffset + 4) };
             out.vertices.push_back(vertex);
@@ -307,8 +363,8 @@ bool ParseSolidObject(const Chunk& objectChunk, SolidObject& out, Game game) {
                 break;
 
             case kChunkMeshContainer: {
-                if (game == Game::MostWanted) {
-                    if (!ParseMeshMW(child, out)) return false;
+                if (game == Game::MostWanted || game == Game::Carbon) {
+                    if (!ParseMeshMW(child, out, game)) return false;
                     break;
                 }
                 ChunkReader mesh = ChunkReader::Children(child);
@@ -337,7 +393,7 @@ bool ParseSolidObject(const Chunk& objectChunk, SolidObject& out, Game game) {
         }
     }
 
-    if (game == Game::MostWanted) return !out.vertices.empty() && !out.indices.empty();
+    if (game == Game::MostWanted || game == Game::Carbon) return !out.vertices.empty() && !out.indices.empty();
 
     if (!ParseVertices(vertexData, vertexCount, out)) return false;
     ParseIndices(indexData, triangleCount, out);

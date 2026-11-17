@@ -41,7 +41,7 @@ std::vector<std::pair<size_t, size_t>> RecordBodies(ByteSpan span) {
 
 } // namespace
 
-bool Preculler::Parse(ByteSpan bunFile, bool underground1, bool mostWanted) {
+bool Preculler::Parse(ByteSpan bunFile, bool underground1, bool mostWanted, bool carbon) {
     zones_.clear();
     visible_.clear();
     records_.clear();
@@ -100,16 +100,18 @@ bool Preculler::Parse(ByteSpan bunFile, bool underground1, bool mostWanted) {
                 // its zone objects test the point against `count` points from
                 // +0x1C of the body). Taking the middle for a ring point, and
                 // stopping short of the last ones, puts the edges wrong.
-                if (points < 3 || 28 + (size_t)points * 8 > body.size) continue;
+                // Carbon: twelve bytes of zeros after the count, then the same.
+                const size_t box = carbon ? 0x10 : 4, ring = box + 24;
+                if (points < 3 || ring + (size_t)points * 8 > body.size) continue;
 
-                zone.boundsMin = { body.read<float>(4),  body.read<float>(8),  0.0f };
-                zone.boundsMax = { body.read<float>(12), body.read<float>(16), 0.0f };
+                zone.boundsMin = { body.read<float>(box),     body.read<float>(box + 4),  0.0f };
+                zone.boundsMax = { body.read<float>(box + 8), body.read<float>(box + 12), 0.0f };
                 if (zone.boundsMin.x > zone.boundsMax.x) std::swap(zone.boundsMin.x, zone.boundsMax.x);
                 if (zone.boundsMin.y > zone.boundsMax.y) std::swap(zone.boundsMin.y, zone.boundsMax.y);
 
                 for (u32 i = 0; i < points; ++i)
-                    zone.ring.push_back({ body.read<float>(28 + i * 8),
-                                          body.read<float>(32 + i * 8), 0.0f });
+                    zone.ring.push_back({ body.read<float>(ring + i * 8),
+                                          body.read<float>(ring + 4 + i * 8), 0.0f });
 
                 zone.recordOffset = (u64)(child.data.data - bunFile.data) + offset;
                 zone.recordLength = (u32)length;

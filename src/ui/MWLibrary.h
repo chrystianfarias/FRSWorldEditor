@@ -18,3 +18,6 @@ class MainWindow;
 // the region's library (io/PlacementWrite.cpp), from where every section can
 // place it. The same shape as ui/U1Library.h.
 std::unique_ptr<EditorExtension> CreateMWLibrary(MainWindow& window);
+// Need for Speed Carbon's, the same way: Palmont City (L5RA), the folder set
+// on the same page.
+std::unique_ptr<EditorExtension> CreateCarbonLibrary(MainWindow& window);

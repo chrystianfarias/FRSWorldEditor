@@ -692,6 +692,7 @@ void MainWindow::OnCreate() {
     extensions_.push_back(CreateU1Library(*this));
     // And Need for Speed Most Wanted's (ui/MWLibrary.h).
     extensions_.push_back(CreateMWLibrary(*this));
+    extensions_.push_back(CreateCarbonLibrary(*this));
     // The mesh editor (ui/MeshTools.h), asked before the collision tools so
     // that while it edits, Ctrl+Z steps its own edit back.
     {
@@ -1443,7 +1444,7 @@ void MainWindow::ShowAbout() {
         window_,
         L"FRS World Editor 0.1.0\n"
         L"A world editor for the Need for Speed games of the Black Box era: it edits Underground 2's "
-        L"worlds and reads Underground's and Most Wanted's.\n\n"
+        L"worlds and reads Underground's, Most Wanted's and Carbon's.\n\n"
         L"Created by Chrystian Farias.\n\n"
         L"Licensed under Creative Commons Attribution-NonCommercial 4.0 (CC BY-NC 4.0): you may "
         L"share and adapt it, crediting Chrystian Farias, and not for commercial purposes -- it may "
@@ -1479,6 +1480,8 @@ void MainWindow::UpdateTitle() {
             title += L" (Underground, track " + std::to_wstring(world_->TrackNumber()) + L", read-only)";
         else if (world_->IsMostWanted())
             title += L" (Most Wanted, read-only)";
+        else if (world_->IsCarbon())
+            title += L" (Carbon, read-only)";
     }
     if (!gameFolder_.empty()) title += L" [" + worldName_ + L"]";
     ::SetWindowTextW(window_, title.c_str());

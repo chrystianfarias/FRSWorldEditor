@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Types.h"
+#include "nfs/Game.h"
 
 #include <string>
 #include <vector>
@@ -37,11 +38,16 @@
 // `fileOffset` in its file (the 0x11 filler depends on it). `out` gets the
 // same model as Underground 2 stores it, laid out to start on a 128-byte
 // boundary.
-bool ConvertMWObject(ByteSpan object, u64 fileOffset, std::vector<u8>& out, std::wstring& error);
+//
+// Carbon's models (`game` Carbon) go the same way: the same chunks, wider
+// materials and more vertex layouts, all read into the same 36-byte vertices.
+bool ConvertMWObject(ByteSpan object, u64 fileOffset, std::vector<u8>& out, std::wstring& error,
+                     nfs::Game game = nfs::Game::MostWanted);
 
 // Headless check (FRSWorldEditor.exe --mw-selftest <Most Wanted folder>):
 // converts every model of L2RA, reads each back as Underground 2 and compares
 // it with the model as read from Most Wanted, and tries to copy every texture
 // the converted models use. Writes the result to the log; returns 0 when
 // nothing failed.
-int RunMWSelfTest(const std::wstring& folder);
+// --carbon-selftest <Carbon folder>: the same over Carbon's L5RA.
+int RunMWSelfTest(const std::wstring& folder, nfs::Game game = nfs::Game::MostWanted);

@@ -100,6 +100,7 @@ const wchar_t* World::GameName() const {
     switch (game_) {
         case Game::Underground1: return L"Need for Speed Underground";
         case Game::MostWanted:   return L"Need for Speed Most Wanted";
+        case Game::Carbon:       return L"Need for Speed Carbon";
         default:                 return L"Need for Speed Underground 2";
     }
 }
@@ -109,9 +110,16 @@ bool World::IsMostWantedRegion(const std::wstring& region) {
            (region[2] == L'R' || region[2] == L'r');
 }
 
+bool World::IsCarbonRegion(const std::wstring& region) {
+    return region.size() >= 3 && (region[0] == L'L' || region[0] == L'l') && region[1] == L'5' &&
+           (region[2] == L'R' || region[2] == L'r');
+}
+
 bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region) {
     Close();
-    game_ = IsMostWantedRegion(region) ? Game::MostWanted : Game::Underground2;
+    game_ = IsMostWantedRegion(region) ? Game::MostWanted
+          : IsCarbonRegion(region)     ? Game::Carbon
+                                       : Game::Underground2;
 
     // A region the editor made reads the files of the region it copies; its
     // edits keep its own name (nfs/CustomRegions.h).
@@ -139,15 +147,15 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
 
     // Visibility is optional: a region without it simply falls back to
     // drawing by distance, which is worse but not fatal.
-    preculler_.Parse(layout_.Span(), false, IsMostWanted());
+    preculler_.Parse(layout_.Span(), false, HasMostWantedLayout(), IsCarbon());
 
     // The edits live beside the game, not in it, so they are gathered here and
     // applied to each mesh as its section is parsed. That way the viewport and
     // the running game are looking at the same geometry.
     overlays_.clear();
     spans_.clear();
-    // Nothing is ever written for Most Wanted, so there are no edits to read back.
-    if (!overlayFolder_.empty() && !IsMostWanted()) {
+    // Nothing is ever written for Most Wanted or Carbon, so there are no edits to read back.
+    if (!overlayFolder_.empty() && !HasMostWantedLayout()) {
         const size_t loaded = ReadMeshOverlays(overlayFolder_, region, overlays_);
         if (loaded) LOG_INFO("%zu edited meshes loaded from the models folder", loaded);
 
@@ -162,7 +170,7 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
     // visibility their zones, beside everything the shipped file has at the
     // same offsets.
     std::vector<u8> served;
-    if (!overlayFolder_.empty() && !IsMostWanted() &&
+    if (!overlayFolder_.empty() && !HasMostWantedLayout() &&
         ::GetFileAttributesW((overlayFolder_ + L"\\imports-" + region + L".txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
         FileMap copy;
         if (copy.Open(overlayFolder_ + L"\\files\\TRACKS\\" + region + L".BUN")) {
@@ -203,10 +211,11 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
     // (io/RegionCreate.h, ApplyEmptyRegionLists).
     // Most Wanted's moving objects are EAGL4 animations (0x00E34010), not
     // read yet.
-    if (!emptyCity_ && !IsMostWanted()) objectAnimations_.Parse(layout_.Span());
-    if (IsMostWanted())
-        LOG_INFO("Most Wanted region %S: %zu sections, %zu visibility zones (read-only)", region.c_str(),
-                 table_.Sections().size(), preculler_.ZoneCount());
+    if (!emptyCity_ && !HasMostWantedLayout()) objectAnimations_.Parse(layout_.Span());
+    if (HasMostWantedLayout())
+        LOG_INFO("%s region %S: %zu sections, %zu visibility zones (read-only)",
+                 IsCarbon() ? "Carbon" : "Most Wanted", region.c_str(), table_.Sections().size(),
+                 preculler_.ZoneCount());
 
     region_ = region;
     sectionToLoaded_.assign(table_.Sections().size(), -1);

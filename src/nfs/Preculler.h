@@ -32,7 +32,10 @@ public:
     // Most Wanted has Underground 2's children with a different list record:
     // u32 0, u16 zone id at +4, u8 count and u8 room at +6, u16 count at +8,
     // then the u16 section numbers from +10.
-    bool Parse(ByteSpan bunFile, bool underground1 = false, bool mostWanted = false);
+    // Most Wanted's (and Carbon's) visibility lists put the id at +4 and a
+    // 16-bit count at +8; Carbon's zone outlines start at +0x28 of the body
+    // (twelve more bytes after the id and count), not +0x1C.
+    bool Parse(ByteSpan bunFile, bool underground1 = false, bool mostWanted = false, bool carbon = false);
 
     bool IsEmpty() const { return zones_.empty(); }
 
