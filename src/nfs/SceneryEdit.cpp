@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace nfs {
@@ -39,10 +40,43 @@ constexpr size_t kInstRotation        = 0x2C;
 
 constexpr float kRotationScale = 8192.0f;
 
+// Underground 1 (nfs/Scenery.h): the same chunk with smaller records. Infos of
+// 72 bytes -- six model hashes (detail levels; 4 and 5 for the reflections),
+// i16 size thresholds at 0x18, eModel pointers at 0x24 filled at run time, the
+// radius at 0x44 -- and no name. Instances of 48: i16 box min and max in whole
+// units, the info index at 0x0C, the flags at 0x0E, the translation at 0x10,
+// the rotation at 0x1C. Tree nodes of 24: i16 box, i16 child count at 12, five
+// i16 children at 14 (the same references as Underground 2's). The flag of a
+// mesh already in world space is 0x0200.
+//
+// Which one a chunk is, is told from the chunk itself (Split): the tables'
+// sizes and the records' model indices. A record alone is told by its size.
+// Each public function holds the answer for its own call (FormatScope), on its
+// own thread: a model library may be reading Underground 1 while the open
+// region is Underground 2's.
+thread_local bool g_underground1 = false;
+
+struct FormatScope {
+    bool previous;
+    explicit FormatScope(bool underground1) : previous(g_underground1) { g_underground1 = underground1; }
+    ~FormatScope() { g_underground1 = previous; }
+};
+
+struct Layout {
+    size_t info, instance, node;
+    size_t infoHash, instInfo, instFlags, instTranslation, instRotation;
+    size_t nodeCount, nodeChildren;
+    u16 worldSpace;
+};
+constexpr Layout kU2Layout{ kInfoSize, kInstanceSize, 36, kInfoHash, kInstInfoIndex, kInstFlags, kInstTranslation,
+                            kInstRotation, 24, 26, 0x0100 };
+constexpr Layout kU1Layout{ 72, 48, 24, 0x00, 0x0C, 0x0E, 0x10, 0x1C, 12, 14, 0x0200 };
+constexpr size_t kU1InfoRadius = 0x44;
+const Layout& L() { return g_underground1 ? kU1Layout : kU2Layout; }
+
 // A tree node: the box of everything under it, a child count and up to five
 // children. A child below 0x8000 is an instance; one above is the node at
 // 0x10000 - child. Node 0 is the root.
-constexpr size_t kNodeSize     = 36;
 constexpr size_t kNodeChildren = 5;
 
 struct Node {
@@ -59,7 +93,18 @@ struct Parts {
     struct Child { u32 id; ByteSpan raw; ByteSpan data; };
     std::vector<Child> children;
     ByteSpan header, infos, instances, tree;
+    bool underground1 = false;
 };
+
+// Whether the tables read whole as `layout`, every record naming a listed model.
+bool Fits(const Parts& parts, const Layout& layout) {
+    if (parts.infos.size % layout.info || parts.instances.size % layout.instance || parts.tree.size % layout.node)
+        return false;
+    const size_t infos = parts.infos.size / layout.info;
+    for (size_t i = 0; i < parts.instances.size / layout.instance; ++i)
+        if (parts.instances.read<u16>(i * layout.instance + layout.instInfo) >= infos) return false;
+    return true;
+}
 
 bool Split(ByteSpan chunk, u64 fileOffset, Parts& out) {
     if (chunk.size < 8 || chunk.read<u32>(0) != kSceneryPack) return false;
@@ -86,6 +131,11 @@ bool Split(ByteSpan chunk, u64 fileOffset, Parts& out) {
             default: break;
         }
     }
+    // Underground 1 when only its layout fits; when both do (sizes that are
+    // whole in both), Underground 2's infos start with the model's name.
+    const bool u1 = Fits(out, kU1Layout), u2 = Fits(out, kU2Layout);
+    out.underground1 = u1 && (!u2 || out.infos.empty() ||
+                              !(out.infos.data[0] >= 'A' && out.infos.data[0] <= 'Z'));
     return !out.infos.empty() || !out.instances.empty();
 }
 
@@ -100,11 +150,48 @@ Vec3 ReadVec3(ByteSpan span, size_t at) {
     return { span.read<float>(at), span.read<float>(at + 4), span.read<float>(at + 8) };
 }
 
-Aabb InstanceBounds(ByteSpan instances, size_t index) {
+// Underground 1 keeps boxes in whole units as i16.
+Vec3 ReadI16Vec3(ByteSpan span, size_t at) {
+    return { (float)span.read<i16>(at), (float)span.read<i16>(at + 2), (float)span.read<i16>(at + 4) };
+}
+i16 ClampI16(float v) { return (i16)std::clamp<long>(std::lround(v), -32768, 32767); }
+void PutBoxI16(std::vector<u8>& out, size_t at, const Aabb& box) {
+    const i16 v[6] = { ClampI16(std::floor(box.min.x)), ClampI16(std::floor(box.min.y)), ClampI16(std::floor(box.min.z)),
+                       ClampI16(std::ceil(box.max.x)),  ClampI16(std::ceil(box.max.y)),  ClampI16(std::ceil(box.max.z)) };
+    std::memcpy(out.data() + at, v, sizeof(v));
+}
+
+Aabb ReadBox(ByteSpan span, size_t at) {
     Aabb box;
-    box.min = ReadVec3(instances, index * kInstanceSize + kInstBoundsMin);
-    box.max = ReadVec3(instances, index * kInstanceSize + kInstBoundsMax);
+    if (g_underground1) {
+        box.min = ReadI16Vec3(span, at);
+        box.max = ReadI16Vec3(span, at + 6);
+    } else {
+        box.min = ReadVec3(span, at);
+        box.max = ReadVec3(span, at + 12);
+    }
     return box;
+}
+void PutBox(std::vector<u8>& out, size_t at, const Aabb& box);
+
+void PutBox(std::vector<u8>& out, size_t at, const Aabb& box) {
+    if (g_underground1) {
+        PutBoxI16(out, at, box);
+    } else {
+        PutVec3(out, at, box.min);
+        PutVec3(out, at + 12, box.max);
+    }
+}
+
+Aabb InstanceBounds(ByteSpan instances, size_t index) {
+    return ReadBox(instances, index * L().instance + kInstBoundsMin);
+}
+
+// A tree node: its box (as ReadBox), the child count and the children.
+void ReadNode(ByteSpan raw, Aabb& box, u16& count, size_t& childrenAt) {
+    box = ReadBox(raw, 0);
+    count = raw.read<u16>(L().nodeCount);
+    childrenAt = L().nodeChildren;
 }
 
 float Grow(const Aabb& box, const Aabb& add) {
@@ -171,9 +258,10 @@ Aabb PlacedInstance::WorldBounds() const {
 bool ReadSceneryChunk(ByteSpan chunk, u64 fileOffset, SceneryChunkInfo& out) {
     Parts parts;
     if (!Split(chunk, fileOffset, parts)) return false;
+    const FormatScope scope(parts.underground1);
     out.number = parts.header.read<u32>(kHeaderNumber);
-    out.infoCount = parts.infos.size / kInfoSize;
-    out.instanceCount = parts.instances.size / kInstanceSize;
+    out.infoCount = parts.infos.size / L().info;
+    out.instanceCount = parts.instances.size / L().instance;
     return true;
 }
 
@@ -181,26 +269,29 @@ bool ReadSceneryPlacements(ByteSpan chunk, u64 fileOffset, size_t first,
                            std::vector<PlacedInstance>& out) {
     Parts parts;
     if (!Split(chunk, fileOffset, parts)) return false;
+    const FormatScope scope(parts.underground1);
 
-    const size_t count = parts.instances.size / kInstanceSize;
+    const Layout& f = L();
+    const size_t count = parts.instances.size / f.instance;
     for (size_t i = first; i < count; ++i) {
-        const ByteSpan record = parts.instances.sub(i * kInstanceSize, kInstanceSize);
-        const u16 infoIndex = record.read<u16>(kInstInfoIndex);
-        const ByteSpan info = parts.infos.sub((size_t)infoIndex * kInfoSize, kInfoSize);
+        const ByteSpan record = parts.instances.sub(i * f.instance, f.instance);
+        const u16 infoIndex = record.read<u16>(f.instInfo);
+        const ByteSpan info = parts.infos.sub((size_t)infoIndex * f.info, f.info);
 
         PlacedInstance placed;
-        placed.modelHash = info.read<u32>(kInfoHash);
-        placed.modelName.assign((const char*)info.data,
-                                ::strnlen((const char*)info.data, std::min<size_t>(info.size, 32)));
-        placed.flags = record.read<u16>(kInstFlags);
+        placed.modelHash = info.read<u32>(f.infoHash);
+        if (!g_underground1)   // Underground 1's infos name no model
+            placed.modelName.assign((const char*)info.data,
+                                    ::strnlen((const char*)info.data, std::min<size_t>(info.size, 32)));
+        placed.flags = record.read<u16>(f.instFlags);
         placed.infoTemplate.assign(info.data, info.data + info.size);
 
         placed.transform = Mat4::Identity();
         for (int row = 0; row < 3; ++row)
             for (int col = 0; col < 3; ++col)
                 placed.transform.m[row][col] =
-                    record.read<i16>(kInstRotation + (size_t)(row * 3 + col) * 2) / kRotationScale;
-        const Vec3 t = ReadVec3(record, kInstTranslation);
+                    record.read<i16>(f.instRotation + (size_t)(row * 3 + col) * 2) / kRotationScale;
+        const Vec3 t = ReadVec3(record, f.instTranslation);
         placed.transform.m[3][0] = t.x;
         placed.transform.m[3][1] = t.y;
         placed.transform.m[3][2] = t.z;
@@ -226,8 +317,9 @@ void RecomputeBounds(std::vector<Node>& nodes, const std::vector<Aabb>& boxes, s
 bool ReadSceneryRecords(ByteSpan chunk, u64 fileOffset, std::vector<std::vector<u8>>& out) {
     Parts parts;
     if (!Split(chunk, fileOffset, parts)) return false;
-    for (size_t i = 0; i < parts.instances.size / kInstanceSize; ++i) {
-        const ByteSpan record = parts.instances.sub(i * kInstanceSize, kInstanceSize);
+    const FormatScope scope(parts.underground1);
+    for (size_t i = 0; i < parts.instances.size / L().instance; ++i) {
+        const ByteSpan record = parts.instances.sub(i * L().instance, L().instance);
         out.emplace_back(record.data, record.data + record.size);
     }
     return true;
@@ -236,31 +328,48 @@ bool ReadSceneryRecords(ByteSpan chunk, u64 fileOffset, std::vector<std::vector<
 std::string SceneryRecordModel(ByteSpan chunk, u64 fileOffset, size_t index) {
     Parts parts;
     if (!Split(chunk, fileOffset, parts)) return {};
-    const u16 info = parts.instances.read<u16>(index * kInstanceSize + kInstInfoIndex);
-    const ByteSpan entry = parts.infos.sub((size_t)info * kInfoSize, kInfoSize);
+    const FormatScope scope(parts.underground1);
+    const u16 info = parts.instances.read<u16>(index * L().instance + L().instInfo);
+    const ByteSpan entry = parts.infos.sub((size_t)info * L().info, L().info);
     if (entry.size < 32) return {};
+    if (g_underground1) {   // no name: the model's hash
+        char text[16];
+        std::snprintf(text, sizeof(text), "%08X", entry.read<u32>(0));
+        return text;
+    }
     return std::string((const char*)entry.data, ::strnlen((const char*)entry.data, 32));
 }
 
+Vec3 RecordTranslation(const std::vector<u8>& record) {
+    const FormatScope scope(record.size() == kU1Layout.instance);
+    if (record.size() < L().instTranslation + 12) return {};
+    return ReadVec3(ByteSpan{ record.data(), record.size() }, L().instTranslation);
+}
+
 std::vector<u8> DeletedRecord(const std::vector<u8>& record) {
+    const FormatScope scope(record.size() == kU1Layout.instance);
+    const Layout& f = L();
     std::vector<u8> out = record;
-    if (out.size() >= kInstRotation + 18) std::memset(out.data() + kInstRotation, 0, 18);
-    // Flag 0x0100: the mesh is already in world space and the game draws it
-    // WITHOUT the matrix (sub_5D6570), so a zeroed matrix would not remove it.
-    // Cleared, the zero matrix applies like on any other record.
-    if (out.size() >= kInstFlags + 2) {
+    if (out.size() >= f.instRotation + 18) std::memset(out.data() + f.instRotation, 0, 18);
+    // Flag 0x0100 (Underground 1: 0x0200): the mesh is already in world space
+    // and the game draws it WITHOUT the matrix (sub_5D6570), so a zeroed matrix
+    // would not remove it. Cleared, the zero matrix applies like on any other
+    // record.
+    if (out.size() >= f.instFlags + 2) {
         u16 flags = 0;
-        std::memcpy(&flags, out.data() + kInstFlags, 2);
-        flags &= (u16)~0x0100;
-        std::memcpy(out.data() + kInstFlags, &flags, 2);
+        std::memcpy(&flags, out.data() + f.instFlags, 2);
+        flags &= (u16)~f.worldSpace;
+        std::memcpy(out.data() + f.instFlags, &flags, 2);
     }
     return out;
 }
 
 bool IsDeletedRecord(const std::vector<u8>& record) {
-    if (record.size() < kInstRotation + 18) return false;
+    const FormatScope scope(record.size() == kU1Layout.instance);
+    const size_t at = L().instRotation;
+    if (record.size() < at + 18) return false;
     for (size_t i = 0; i < 18; ++i)
-        if (record[kInstRotation + i] != 0) return false;
+        if (record[at + i] != 0) return false;
     return true;
 }
 
@@ -272,21 +381,42 @@ bool AppendScenery(ByteSpan shipped, u64 fileOffset, const std::vector<PlacedIns
         error = L"That is not a scenery chunk.";
         return false;
     }
+    const FormatScope scope(parts.underground1);
 
     // --- the model table ------------------------------------------------------
+    const Layout& f = L();
     std::vector<u8> infos(parts.infos.data, parts.infos.data + parts.infos.size);
     std::vector<u16> infoFor(added.size());
     for (size_t k = 0; k < added.size(); ++k) {
         const PlacedInstance& placed = added[k];
-        const size_t count = infos.size() / kInfoSize;
+        const size_t count = infos.size() / f.info;
         size_t found = count;
         for (size_t i = 0; i < count && found == count; ++i) {
             u32 hash;
-            std::memcpy(&hash, infos.data() + i * kInfoSize + kInfoHash, 4);
+            std::memcpy(&hash, infos.data() + i * f.info + f.infoHash, 4);
             if (hash == placed.modelHash) found = i;
         }
 
-        if (found == count) {
+        if (found == count && g_underground1) {
+            // Underground 1: the template's levels all made the placed model
+            // (another section's other levels may not be here), the radius kept.
+            if (count >= 0xFFFF) { error = L"The section lists too many models already."; return false; }
+            std::vector<u8> entry(f.info, 0);
+            if (placed.infoTemplate.size() == f.info) {
+                entry = placed.infoTemplate;
+            } else {
+                const i16 threshold = 17;   // drawn from a projected size of 17 on, as the game's own
+                std::memcpy(entry.data() + 0x18, &threshold, 2);
+                PutF(entry, kU1InfoRadius, placed.radius);
+            }
+            for (size_t slot = 0; slot < 6; ++slot) {
+                u32 hash = 0;
+                std::memcpy(&hash, entry.data() + slot * 4, 4);
+                if (slot == 0 || hash != 0) Put32(entry, slot * 4, placed.modelHash);
+            }
+            std::memset(entry.data() + 0x24, 0, 0x20);   // the run time's model pointers
+            infos.insert(infos.end(), entry.begin(), entry.end());
+        } else if (found == count) {
             if (count >= 0xFFFF) { error = L"The section lists too many models already."; return false; }
             std::vector<u8> entry(kInfoSize, 0);
             if (placed.infoTemplate.size() == kInfoSize) {
@@ -310,7 +440,7 @@ bool AppendScenery(ByteSpan shipped, u64 fileOffset, const std::vector<PlacedIns
     }
 
     // --- the records ----------------------------------------------------------
-    const size_t shippedCount = parts.instances.size / kInstanceSize;
+    const size_t shippedCount = parts.instances.size / f.instance;
     if (shippedCount + added.size() >= 0x8000) {
         error = L"The section places too many instances for its tree.";
         return false;
@@ -318,14 +448,15 @@ bool AppendScenery(ByteSpan shipped, u64 fileOffset, const std::vector<PlacedIns
 
     std::vector<u8> instances(parts.instances.data, parts.instances.data + parts.instances.size);
     bool boxesMoved = false;
+    const size_t boxBytes = g_underground1 ? 12 : 24;
     for (const ReplacedRecord& swap : replaced) {
-        if (swap.index >= shippedCount || swap.record.size() != kInstanceSize) {
+        if (swap.index >= shippedCount || swap.record.size() != f.instance) {
             error = L"An edited record does not fit the section's scenery.";
             return false;
         }
-        const ByteSpan before = parts.instances.sub(swap.index * kInstanceSize, kInstanceSize);
-        if (std::memcmp(before.data, swap.record.data(), 24) != 0) boxesMoved = true;
-        std::memcpy(instances.data() + swap.index * kInstanceSize, swap.record.data(), kInstanceSize);
+        const ByteSpan before = parts.instances.sub(swap.index * f.instance, f.instance);
+        if (std::memcmp(before.data, swap.record.data(), boxBytes) != 0) boxesMoved = true;
+        std::memcpy(instances.data() + swap.index * f.instance, swap.record.data(), f.instance);
     }
     const ByteSpan edited{ instances.data(), instances.size() };
     std::vector<Aabb> boxes;
@@ -333,13 +464,13 @@ bool AppendScenery(ByteSpan shipped, u64 fileOffset, const std::vector<PlacedIns
 
     for (size_t k = 0; k < added.size(); ++k) {
         const PlacedInstance& placed = added[k];
-        std::vector<u8> record(kInstanceSize, 0);
-        const Aabb box = placed.WorldBounds();
-        PutVec3(record, kInstBoundsMin, box.min);
-        PutVec3(record, kInstBoundsMax, box.max);
-        Put16(record, kInstInfoIndex, infoFor[k]);
-        Put16(record, kInstFlags, placed.flags);
-        PutVec3(record, kInstTranslation,
+        std::vector<u8> record(f.instance, 0);
+        Aabb box = placed.WorldBounds();
+        PutBox(record, kInstBoundsMin, box);
+        if (g_underground1) box = ReadBox(ByteSpan{ record.data(), record.size() }, kInstBoundsMin);   // as stored
+        Put16(record, f.instInfo, infoFor[k]);
+        Put16(record, f.instFlags, placed.flags);
+        PutVec3(record, f.instTranslation,
                 { placed.transform.m[3][0], placed.transform.m[3][1], placed.transform.m[3][2] });
         for (int row = 0; row < 3; ++row) {
             for (int col = 0; col < 3; ++col) {
@@ -348,7 +479,7 @@ bool AppendScenery(ByteSpan shipped, u64 fileOffset, const std::vector<PlacedIns
                     error = L"A placement is scaled by more than four; the file cannot store it.";
                     return false;
                 }
-                Put16(record, kInstRotation + (size_t)(row * 3 + col) * 2, (u16)(i16)fixed);
+                Put16(record, f.instRotation + (size_t)(row * 3 + col) * 2, (u16)(i16)fixed);
             }
         }
         instances.insert(instances.end(), record.begin(), record.end());
@@ -357,13 +488,14 @@ bool AppendScenery(ByteSpan shipped, u64 fileOffset, const std::vector<PlacedIns
 
     // --- the tree -------------------------------------------------------------
     std::vector<Node> nodes;
-    for (size_t n = 0; n < parts.tree.size / kNodeSize; ++n) {
-        const ByteSpan raw = parts.tree.sub(n * kNodeSize, kNodeSize);
+    for (size_t n = 0; n < parts.tree.size / f.node; ++n) {
+        const ByteSpan raw = parts.tree.sub(n * f.node, f.node);
         Node node;
-        node.bounds.min = ReadVec3(raw, 0);
-        node.bounds.max = ReadVec3(raw, 12);
-        const u16 count = std::min<u16>(raw.read<u16>(24), (u16)kNodeChildren);
-        for (u16 c = 0; c < count; ++c) node.children.push_back(raw.read<u16>(26 + (size_t)c * 2));
+        u16 count = 0;
+        size_t childrenAt = 0;
+        ReadNode(raw, node.bounds, count, childrenAt);
+        count = std::min<u16>(count, (u16)kNodeChildren);
+        for (u16 c = 0; c < count; ++c) node.children.push_back(raw.read<u16>(childrenAt + (size_t)c * 2));
         nodes.push_back(node);
     }
     if (boxesMoved && !nodes.empty()) RecomputeBounds(nodes, boxes, 0);
@@ -374,13 +506,12 @@ bool AppendScenery(ByteSpan shipped, u64 fileOffset, const std::vector<PlacedIns
     if (added.empty() && !boxesMoved) {
         tree.assign(parts.tree.data, parts.tree.data + parts.tree.size);
     } else {
-        tree.assign(nodes.size() * kNodeSize, 0);
+        tree.assign(nodes.size() * f.node, 0);
         for (size_t n = 0; n < nodes.size(); ++n) {
-            PutVec3(tree, n * kNodeSize, nodes[n].bounds.min);
-            PutVec3(tree, n * kNodeSize + 12, nodes[n].bounds.max);
-            Put16(tree, n * kNodeSize + 24, (u16)nodes[n].children.size());
+            PutBox(tree, n * f.node, nodes[n].bounds);
+            Put16(tree, n * f.node + f.nodeCount, (u16)nodes[n].children.size());
             for (size_t c = 0; c < nodes[n].children.size(); ++c)
-                Put16(tree, n * kNodeSize + 26 + c * 2, nodes[n].children[c]);
+                Put16(tree, n * f.node + f.nodeChildren + c * 2, nodes[n].children[c]);
         }
     }
 
@@ -424,17 +555,19 @@ bool AppendScenery(ByteSpan shipped, u64 fileOffset, const std::vector<PlacedIns
 bool ValidateScenery(ByteSpan chunk, u64 fileOffset, std::string& why) {
     Parts parts;
     if (!Split(chunk, fileOffset, parts)) { why = "not a scenery chunk"; return false; }
+    const FormatScope scope(parts.underground1);
 
-    const size_t count = parts.instances.size / kInstanceSize;
-    const size_t infos = parts.infos.size / kInfoSize;
-    const size_t nodes = parts.tree.size / kNodeSize;
-    if (parts.instances.size % kInstanceSize || parts.infos.size % kInfoSize ||
-        parts.tree.size % kNodeSize) { why = "a table is not a whole number of entries"; return false; }
+    const Layout& f = L();
+    const size_t count = parts.instances.size / f.instance;
+    const size_t infos = parts.infos.size / f.info;
+    const size_t nodes = parts.tree.size / f.node;
+    if (parts.instances.size % f.instance || parts.infos.size % f.info ||
+        parts.tree.size % f.node) { why = "a table is not a whole number of entries"; return false; }
 
     std::vector<Aabb> boxes;
     for (size_t i = 0; i < count; ++i) {
         boxes.push_back(InstanceBounds(parts.instances, i));
-        if (parts.instances.read<u16>(i * kInstanceSize + kInstInfoIndex) >= infos) {
+        if (parts.instances.read<u16>(i * f.instance + f.instInfo) >= infos) {
             why = "an instance names a model the section does not list";
             return false;
         }
@@ -445,22 +578,20 @@ bool ValidateScenery(ByteSpan chunk, u64 fileOffset, std::string& why) {
     std::vector<int> seenInstance(count, 0), seenNode(nodes, 0);
     const float slack = 1e-3f;
     for (size_t n = 0; n < nodes; ++n) {
-        const ByteSpan raw = parts.tree.sub(n * kNodeSize, kNodeSize);
+        const ByteSpan raw = parts.tree.sub(n * f.node, f.node);
         Aabb box;
-        box.min = ReadVec3(raw, 0);
-        box.max = ReadVec3(raw, 12);
-        const u16 children = raw.read<u16>(24);
+        u16 children = 0;
+        size_t childrenAt = 0;
+        ReadNode(raw, box, children, childrenAt);
         if (children == 0 || children > kNodeChildren) { why = "a node has no or too many children"; return false; }
         for (u16 c = 0; c < children; ++c) {
-            const u16 child = raw.read<u16>(26 + (size_t)c * 2);
+            const u16 child = raw.read<u16>(childrenAt + (size_t)c * 2);
             Aabb inner;
             if (IsNodeRef(child)) {
                 const size_t k = NodeIndex(child);
                 if (k == 0 || k >= nodes) { why = "a node points outside the tree"; return false; }
                 ++seenNode[k];
-                const ByteSpan other = parts.tree.sub(k * kNodeSize, kNodeSize);
-                inner.min = ReadVec3(other, 0);
-                inner.max = ReadVec3(other, 12);
+                inner = ReadBox(parts.tree.sub(k * f.node, f.node), 0);
             } else {
                 if (child >= count) { why = "a node points past the instances"; return false; }
                 ++seenInstance[child];

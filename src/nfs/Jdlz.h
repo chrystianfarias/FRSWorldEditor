@@ -24,4 +24,10 @@ std::vector<u8> JdlzDecompress(ByteSpan data);
 // any other block.
 std::vector<u8> JdlzStore(ByteSpan data);
 
+// A JDLZ block really compressed, as the game's own tool does. Needed where
+// the game unpacks a file in place (Underground 1's TRACKB<n>.LZC: the packed
+// bytes sit at the end of the unpacked buffer), which a stored block, larger
+// than its contents, overruns.
+std::vector<u8> JdlzCompress(ByteSpan data);
+
 } // namespace nfs

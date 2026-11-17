@@ -121,7 +121,7 @@ void PlanSectionSpans(const nfs::World& world, const nfs::Section& section,
     for (const SpanOverlayInfo& span : existing) {
         const bool sameSection =
             span.layoutFile
-                ? span.fileOffset < section.tableEntryOffset + 80 &&
+                ? span.fileOffset < section.tableEntryOffset + world.Table().EntrySize() &&
                   span.fileOffset + span.byteCount > section.tableEntryOffset
                 : span.fileOffset == section.streamOffset;
         if (sameSection &&

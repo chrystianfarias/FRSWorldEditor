@@ -25,9 +25,13 @@ BOOL CALLBACK FindGameWindow(HWND window, LPARAM parameter) {
 
 } // namespace
 
-bool EmbeddedGame::Launch(const std::wstring& gameFolder, HWND owner) {
+bool EmbeddedGame::Launch(const std::wstring& gameFolder, HWND owner, bool windowed) {
     Release();
-    const std::wstring executable = gameFolder + L"\\SPEED2.EXE";
+    // Need for Speed Underground's is speed.exe.
+    std::wstring executable = gameFolder + L"\\SPEED2.EXE";
+    if (::GetFileAttributesW(executable.c_str()) == INVALID_FILE_ATTRIBUTES &&
+        ::GetFileAttributesW((gameFolder + L"\\speed.exe").c_str()) != INVALID_FILE_ATTRIBUTES)
+        executable = gameFolder + L"\\speed.exe";
     SHELLEXECUTEINFOW info{};
     info.cbSize = sizeof(info);
     info.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -43,6 +47,7 @@ bool EmbeddedGame::Launch(const std::wstring& gameFolder, HWND owner) {
     owner_ = owner;
     shown_ = true;
     fullscreen_ = false;
+    knownWindowed_ = windowed;
     stopRequested_ = false;
     ::GetSystemTimeAsFileTime(&launched_);
     LOG_INFO("game started, process %lu", processId_);
@@ -67,7 +72,7 @@ bool EmbeddedGame::Adopt(HWND window) {
     ::GetMonitorInfoW(::MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor);
     RECT rect{};
     ::GetWindowRect(window, &rect);
-    if (!(style & WS_CAPTION) && ::EqualRect(&rect, &monitor.rcMonitor)) {
+    if (!knownWindowed_ && !(style & WS_CAPTION) && ::EqualRect(&rect, &monitor.rcMonitor)) {
         fullscreen_ = true;
         LOG_WARN("game: it runs fullscreen, so it stays out of the viewport (set a windowed mode)");
         return false;
@@ -82,6 +87,9 @@ bool EmbeddedGame::Adopt(HWND window) {
     window_ = window;
     placed_ = RECT{};
     LOG_INFO("game: window %p taken over the viewport", (void*)window);
+    // Need for Speed Underground pauses without the focus: it gets it now,
+    // as it would on its own desktop.
+    if (knownWindowed_) ::SetForegroundWindow(window);
     return true;
 }
 
@@ -97,7 +105,11 @@ void EmbeddedGame::Update(const RECT& area) {
         window_ = nullptr;
         return;
     }
-    if (!shown_ || ::EqualRect(&area, &placed_)) return;
+    if (!shown_) return;
+    // Placed already, and still there: the game (or a mod of it) can move its
+    // window once more while it sets its device up.
+    RECT now{};
+    if (::EqualRect(&area, &placed_) && ::GetWindowRect(window_, &now) && ::EqualRect(&now, &area)) return;
     ::SetWindowPos(window_, HWND_TOP, area.left, area.top, area.right - area.left, area.bottom - area.top,
                    SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     placed_ = area;

@@ -19,7 +19,10 @@ public:
     ~EmbeddedGame() { Release(); }
 
     // Starts SPEED2.EXE from its folder. False when it could not be started.
-    bool Launch(const std::wstring& gameFolder, HWND owner);
+    // `windowed`: the caller knows the game draws into a window (Need for
+    // Speed Underground through its WidescreenFix), so a frameless window the
+    // size of the monitor is still taken into the view.
+    bool Launch(const std::wstring& gameFolder, HWND owner, bool windowed = false);
 
     // True while the game process is alive.
     bool Running() const;
@@ -64,6 +67,7 @@ private:
     RECT   placed_{};
     bool   shown_ = true;
     bool   fullscreen_ = false;
+    bool   knownWindowed_ = false;
     bool   stopRequested_ = false;
     FILETIME launched_{};
 };

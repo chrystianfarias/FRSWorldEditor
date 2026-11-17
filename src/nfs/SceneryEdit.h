@@ -80,6 +80,14 @@ std::string SceneryRecordModel(ByteSpan chunk, u64 fileOffset, size_t index);
 std::vector<u8> DeletedRecord(const std::vector<u8>& record);
 bool IsDeletedRecord(const std::vector<u8>& record);
 
+// Where a record puts its model.
+Vec3 RecordTranslation(const std::vector<u8>& record);
+
+// Every function here reads and writes Underground 2's layout (68-byte infos,
+// 64-byte records, 36-byte nodes) or Underground 1's (72, 48 and 24, boxes in
+// whole units as i16, no model names, world-space flag 0x0200), whichever the
+// chunk -- or the record, by its size -- is in.
+
 // Checks what the game relies on: every record in the tree exactly once,
 // every node but the root referenced exactly once, every node's box holding
 // its children's, every model index in range. Run on anything before it is

@@ -283,6 +283,8 @@ private:
 
     std::wstring LoadStoredGameFolder() const;
     bool RefuseReadOnlyWorld();
+    void WriteUnderground1LaunchLines(FILE* file, u32 track);
+    u32  launchTrack_ = 0;   // Need for Speed Underground: the track the last launch starts
     std::wstring CameraValueName() const;
     void         StoreGameFolder(const std::wstring& folder) const;
     DWORD        StoredSetupVersion() const;
@@ -332,6 +334,10 @@ private:
     EmbeddedGame game_;
     // FRSFastTest was switched on for the launch in flight, at this tick.
     bool  fastBootRestore_ = false;
+    // Need for Speed Underground: the WidescreenFix WindowedMode a launch
+    // changed so the game opens in the view, put back with FRSFastTest's switch.
+    std::string windowedModeRestore_;   // the whole line, as it was
+    bool  fastBootTurnedOn_ = false;   // the launch switched FRSFastTest on
     DWORD fastBootSince_ = 0;
 
     std::vector<nfs::PlacedInstance> clipboard_;

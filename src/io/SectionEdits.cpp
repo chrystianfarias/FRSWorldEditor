@@ -68,9 +68,11 @@ std::vector<ObjectAt> Objects(const nfs::Chunk& pack) {
         if (header.id == 0) continue;
         ObjectAt object;
         object.hash = header.data.read<u32>(0x10);
-        if (header.data.size > 0xA4)
-            object.name.assign((const char*)header.data.data + 0xA4,
-                               ::strnlen((const char*)header.data.data + 0xA4, header.data.size - 0xA4));
+        // The name: +0xA4, or +0x94 in Underground 1's shorter header (version 0x13).
+        const size_t nameAt = (header.data.read<u32>(0x0C) & 0xFFFFu) <= 0x13 ? 0x94 : 0xA4;
+        if (header.data.size > nameAt)
+            object.name.assign((const char*)header.data.data + nameAt,
+                               ::strnlen((const char*)header.data.data + nameAt, header.data.size - nameAt));
         object.whole = ByteSpan{ entry.raw.data - 8, entry.raw.size + 8 };
         object.fileOffset = entry.headerOffset;
         out.push_back(object);
@@ -403,10 +405,9 @@ bool DiffSectionBytes(const nfs::World& world, const nfs::Section& section, Byte
                     edit.sceneryNumber = info.number;
                     edit.index = (u32)i;
                     edit.record = after[i];
-                    float t[3];
-                    std::memcpy(t, before[i].data() + 0x20, 12);
+                    const Vec3 t = nfs::RecordTranslation(before[i]);
                     wchar_t text[96];
-                    ::swprintf_s(text, L"at %.1f, %.1f, %.1f", t[0], t[1], t[2]);
+                    ::swprintf_s(text, L"at %.1f, %.1f, %.1f", t.x, t.y, t.z);
                     edit.detail = text;
                     out.push_back(std::move(edit));
                 }
@@ -689,7 +690,7 @@ bool PlanSectionFromEdits(const nfs::World& world, const nfs::Section& section,
         for (const SpanOverlayInfo& span : existing) {
             const bool sameSection =
                 span.layoutFile
-                    ? span.fileOffset < section.tableEntryOffset + 80 &&
+                    ? span.fileOffset < section.tableEntryOffset + world.Table().EntrySize() &&
                       span.fileOffset + span.byteCount > section.tableEntryOffset
                     : span.fileOffset == section.streamOffset;
             if (sameSection) out.superseded.push_back(span.path);

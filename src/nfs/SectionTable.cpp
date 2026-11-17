@@ -66,6 +66,7 @@ bool SectionTable::Parse(ByteSpan bunFile) {
         return false;
     }
 
+    entrySize_ = underground1 ? kSectionEntrySizeU1 : kSectionEntrySize;
     if (underground1) {
         const size_t count = table.size / kSectionEntrySizeU1;
         size_t trackOwn = 0;
@@ -133,7 +134,7 @@ void SectionTable::ApplyBytes(u64 fileOffset, const u8* data, size_t size) {
         if (!section.tableEntryOffset) continue;
 
         const u64 entryBegin = section.tableEntryOffset;
-        const u64 entryEnd   = entryBegin + kSectionEntrySize;
+        const u64 entryEnd   = entryBegin + entrySize_;
         if (fileOffset + size <= entryBegin || fileOffset >= entryEnd) continue;
 
         u8 entry[kSectionEntrySize];

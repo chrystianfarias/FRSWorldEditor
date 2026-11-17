@@ -320,6 +320,15 @@ bool HookMainLoop() {
     return true;
 }
 
+// Need for Speed Underground: the same plugin hands its tracks the editor's
+// edits, and nothing else -- every address below is SPEED2.EXE's.
+bool IsUnderground1() {
+    wchar_t path[MAX_PATH]{};
+    ::GetModuleFileNameW(nullptr, path, MAX_PATH);
+    const wchar_t* name = ::wcsrchr(path, L'\\');
+    return ::_wcsicmp(name ? name + 1 : path, L"speed.exe") == 0;
+}
+
 // The code at the heart of the plugin's patches must be the v1.2 executable's.
 bool RightExecutable() {
     const unsigned char update[6] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24 };
@@ -347,9 +356,14 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     Log("--- FRS World Loader ---");
 
     // The file edits do not depend on the executable's code, only on its
-    // files, so they go in on any build.
+    // files, so they go in on any build -- Need for Speed Underground's
+    // speed.exe included, which reads its tracks the same way.
     StartFileEdits();
 
+    if (IsUnderground1()) {
+        Log("Need for Speed Underground (speed.exe): file edits only");
+        return TRUE;
+    }
     if (!RightExecutable()) {
         Log("this SPEED2.EXE is not v1.2: the launch pose stays off");
         return TRUE;

@@ -76,6 +76,9 @@ public:
     // visibility zones, which carry each drivable section's outline.
     void SetPosition(size_t index, const Vec3& position);
 
+    // Bytes per table entry: 80, or 56 in Underground 1's.
+    size_t EntrySize() const { return entrySize_; }
+
     const Section* FindByName(const std::string& name) const;
     const Section* FindByNumber(u32 number) const;
 
@@ -92,6 +95,7 @@ public:
 
 private:
     std::vector<Section> sections_;
+    size_t entrySize_ = 80;
 };
 
 } // namespace nfs

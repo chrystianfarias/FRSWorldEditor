@@ -2,6 +2,8 @@
 
 #include "core/Log.h"
 #include "io/CollisionExport.h"
+#include "io/U1FreeRoam.h"
+#include "io/U1TrackBundles.h"
 #include "io/CollisionImport.h"
 #include "ui/CollisionTools.h"
 #include "ui/CrashReport.h"
@@ -1476,13 +1478,25 @@ void MainWindow::ShowAbout() {
 // Worlds
 // ---------------------------------------------------------------------------
 
-// Underground 1 regions open read-only: the plugins that would hand the game
-// an edit are written for Underground 2. True (and says so) when the open
-// region is one.
+// Need for Speed Underground regions take moved, deleted and placed objects
+// and edited meshes; their collision is every track's own, in each track's
+// bundle, and is not written yet. True (and says so) when a save of the open
+// region would hold a collision edit -- which is then dropped, the rest kept.
 bool MainWindow::RefuseReadOnlyWorld() {
     if (!world_ || !world_->IsUnderground1()) return false;
-    ::MessageBoxW(window_, L"Need for Speed Underground regions are read-only for now: the editor can show and export them, but nothing it writes would reach the game.", kWindowTitle, MB_ICONINFORMATION | MB_OK);
-    return true;
+    bool collision = false;
+    for (const auto& section : world_->Loaded())
+        if (section->collisionChanged) {
+            collision = true;
+            section->collisionChanged = false;
+            section->changedCollisionPacks.clear();
+        }
+    if (!collision) return false;
+    ::MessageBoxW(window_,
+                  L"Collision edits cannot be saved for Need for Speed Underground yet (each race track has its "
+                  L"own collision). They were left out; the other edits are saved.",
+                  kWindowTitle, MB_ICONINFORMATION | MB_OK);
+    return false;
 }
 
 void MainWindow::UpdateTitle() {
@@ -1490,7 +1504,7 @@ void MainWindow::UpdateTitle() {
     if (world_) {
         title += L" - " + world_->Region();
         if (world_->IsUnderground1())
-            title += L" (Underground, track " + std::to_wstring(world_->TrackNumber()) + L", read-only)";
+            title += L" (Underground, track " + std::to_wstring(world_->TrackNumber()) + L")";
     }
     if (!gameFolder_.empty()) title += L" [" + worldName_ + L"]";
     ::SetWindowTextW(window_, title.c_str());
@@ -1781,7 +1795,6 @@ void MainWindow::SaveWorld() {
         SetStatusText(2, L"No region open: nothing to save.");
         return;
     }
-    if (RefuseReadOnlyWorld()) return;
     // Extensions write what they have not yet; placements wait for this, and
     // reopen the region once written.
     for (auto& extension : extensions_) extension->Save();
@@ -1864,6 +1877,44 @@ void MainWindow::RestoreCameraPosition() {
                             viewpoint[0], viewpoint[1], viewpoint[2]));
 }
 
+namespace {
+
+// The line of an ini file whose key is `key` ("WindowedMode = 4   ; ..."),
+// replaced by `line`, everything else byte for byte as it was. The line it
+// replaced in `previous`. False when there is no such line.
+bool ReplaceIniLine(const std::wstring& path, const std::string& key, const std::string& line,
+                    std::string* previous) {
+    FILE* file = nullptr;
+    if (::_wfopen_s(&file, path.c_str(), L"rb") != 0 || !file) return false;
+    std::string text;
+    char buffer[4096];
+    for (size_t got; (got = std::fread(buffer, 1, sizeof(buffer), file)) > 0;) text.append(buffer, got);
+    std::fclose(file);
+    for (size_t at = 0; at < text.size();) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        size_t stop = end;
+        if (stop > at && text[stop - 1] == '\r') --stop;
+        const std::string current = text.substr(at, stop - at);
+        size_t after = key.size();
+        if (current.compare(0, key.size(), key) == 0) {
+            while (after < current.size() && (current[after] == ' ' || current[after] == '\t')) ++after;
+            if (after < current.size() && current[after] == '=') {
+                if (previous) *previous = current;
+                text.replace(at, stop - at, line);
+                if (::_wfopen_s(&file, path.c_str(), L"wb") != 0 || !file) return false;
+                std::fwrite(text.data(), 1, text.size(), file);
+                std::fclose(file);
+                return true;
+            }
+        }
+        at = end + 1;
+    }
+    return false;
+}
+
+} // namespace
+
 void MainWindow::LaunchGame() {
     if (gameFolder_.empty()) {
         ::MessageBoxW(window_, L"Set the game folder first.", kWindowTitle,
@@ -1891,8 +1942,10 @@ void MainWindow::LaunchGame() {
     }
 
     // The loader puts the car at the camera, FRSFastTest takes the game there
-    // without the menus: without them this is only starting the game.
-    if (!WorldLoaderInstalled(gameFolder_) || !FastBootInstalled(gameFolder_)) {
+    // without the menus: without them this is only starting the game. In
+    // Need for Speed Underground FRSFastTest puts the car there itself.
+    const bool underground1 = world_ && world_->IsUnderground1();
+    if ((!underground1 && !WorldLoaderInstalled(gameFolder_)) || !FastBootInstalled(gameFolder_)) {
         const int answer = ::MessageBoxW(
             window_,
             L"The game plugins are not installed (FRS World Loader and FRSFastTest): the game would "
@@ -1925,30 +1978,91 @@ void MainWindow::LaunchGame() {
         }
     }
 
+    // Every edit not written yet goes into the game's files first, in every
+    // game: the game starts with the world as it is on screen. As File > Save
+    // World does it (the extensions, then the sections), without asking for
+    // a world file. A save reopens the region, which puts the camera back
+    // where it was last saved: it is saved first, so the car still starts
+    // where the view looks. A save that fails stops the launch -- its report
+    // says why, and the game would show the world without the edit.
+    if (world_) {
+        SaveCameraPosition();
+        for (auto& extension : extensions_) extension->Save();
+        if (HasUnsavedPlacements()) {
+            SetStatusText(2, L"Writing the edits into the game before it starts...");
+            if (!SavePlacements()) return;
+        }
+    }
+
     // What is still only in the editor (roads, terrain) goes into the game's
     // files first, so the game starts with the world as it is edited.
     for (auto& extension : extensions_) extension->OnBeforeLaunch();
 
+    launchTrack_ = 0;
     bool elsewhere = false;
     for (auto& extension : extensions_) elsewhere = elsewhere || extension->LaunchesElsewhere();
     if (elsewhere) ::DeleteFileW((gameFolder_ + L"\\models\\launch-pose.txt").c_str());
     else WriteLaunchPose();
 
+    // Need for Speed Underground: the free roam's collision, every track of
+    // the region together without the race barriers (io/U1FreeRoam.h).
+    if (underground1 && launchTrack_) {
+        io::U1FreeRoamReport report;
+        if (io::WriteU1FreeRoamBundle(gameFolder_, launchTrack_, world_->Underground1Tracks(), report))
+            SetStatusText(2, Format(L"Free roam: %zu collision polygons from %zu tracks, %zu race barriers left out",
+                                    report.polygons, report.tracks, report.raceBarriers));
+        else
+            LOG_WARN("launch: no free roam collision (%S): the track's own is used", report.error.c_str());
+    }
+
     // FRSFastTest reads its switch once, as the game starts. Unless the player
     // keeps it on for every start, it is on for this launch only.
     fastBootRestore_ = false;
+    fastBootTurnedOn_ = false;
     if (FastBootInstalled(gameFolder_) && !FastBootEnabled(gameFolder_)) {
         if (SetFastBootEnabled(gameFolder_, true)) {
             fastBootRestore_ = true;
+            fastBootTurnedOn_ = true;
             fastBootSince_ = ::GetTickCount();
         } else {
             LOG_WARN("launch: could not switch FRSFastTest on in %S", FastBootIni(gameFolder_).c_str());
         }
     }
 
-    if (!game_.Launch(gameFolder_, window_)) {
+    // Need for Speed Underground draws into a window only through its
+    // WidescreenFix: a borderless window (1) for this launch, so it opens in
+    // the view; FRSFastTest leaves its place and size to the editor.
+    bool knownWindowed = false;
+    windowedModeRestore_.clear();
+    if (underground1) {
+        const std::wstring ini = gameFolder_ + L"\\scripts\\NFSUnderground.WidescreenFix.ini";
+        const int current = (int)::GetPrivateProfileIntW(L"MISC", L"WindowedMode", 0, ini.c_str());
+        if (::GetFileAttributesW(ini.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            if (current < 1 || current > 3) {
+                // The value only: the line keeps its comment, and goes back as it was.
+                std::string was;
+                if (ReplaceIniLine(ini, "WindowedMode", "WindowedMode = 1", &was)) {
+                    const size_t comment = was.find(';');
+                    if (comment != std::string::npos) {
+                        std::string line = "WindowedMode = 1";
+                        line.resize(std::max(line.size() + 1, comment), ' ');
+                        ReplaceIniLine(ini, "WindowedMode", line + was.substr(comment), nullptr);
+                    }
+                    windowedModeRestore_ = was;
+                    fastBootRestore_ = true;
+                    fastBootSince_ = ::GetTickCount();
+                }
+            }
+            knownWindowed = true;
+        } else {
+            LOG_WARN("launch: no NFSUnderground.WidescreenFix.ini: the game runs fullscreen, outside the view");
+        }
+    }
+
+    if (!game_.Launch(gameFolder_, window_, knownWindowed)) {
         RestoreFastBoot();
-        ::MessageBoxW(window_, Format(L"Could not start\n%s\\SPEED2.EXE", gameFolder_.c_str()).c_str(),
+        ::MessageBoxW(window_, Format(L"Could not start\n%s\\%s", gameFolder_.c_str(),
+                                     underground1 ? L"speed.exe" : L"SPEED2.EXE").c_str(),
                       kWindowTitle, MB_ICONWARNING | MB_OK);
         return;
     }
@@ -1965,7 +2079,14 @@ void MainWindow::RestoreFastBoot(bool onlyWhenRead) {
         ::GetTickCount() - fastBootSince_ < kFastBootRestoreMs)
         return;
     fastBootRestore_ = false;
-    SetFastBootEnabled(gameFolder_, false);
+    if (!windowedModeRestore_.empty()) {
+        ReplaceIniLine(gameFolder_ + L"\\scripts\\NFSUnderground.WidescreenFix.ini", "WindowedMode",
+                       windowedModeRestore_, nullptr);
+        windowedModeRestore_.clear();
+    }
+    // Only a switch this launch turned on goes back off.
+    if (fastBootTurnedOn_) SetFastBootEnabled(gameFolder_, false);
+    fastBootTurnedOn_ = false;
 }
 
 // The ground under the camera, facing the way it looks: where FRSWorldLoader
@@ -1978,8 +2099,26 @@ void MainWindow::WriteLaunchPose() {
     const Camera& camera = viewport_.GetCamera();
     const Vec3 eye = camera.Position();
     float ground = 0.0f;
-    if (!nfs::GroundBelow(*world_, eye.x, eye.y, eye.z, ground)) {
-        SetStatusText(2, L"No ground under the camera: the car starts where the game puts it");
+    // Need for Speed Underground: the track whose course has ground here.
+    u32 track = world_->TrackNumber();
+    const bool onGround = world_->IsUnderground1()
+                              ? world_->Underground1GroundBelow(eye.x, eye.y, eye.z, ground, track)
+                              : nfs::GroundBelow(*world_, eye.x, eye.y, eye.z, ground);
+    if (!onGround) {
+        SetStatusText(2, world_->IsUnderground1()
+                             ? L"No race course of this region has ground under the camera: the car starts where "
+                               L"the game puts it"
+                             : L"No ground under the camera: the car starts where the game puts it");
+        // Need for Speed Underground: FRSFastTest still takes the region's
+        // track and leaves the window to the view.
+        if (world_->IsUnderground1()) {
+            ::CreateDirectoryW((gameFolder_ + L"\\models").c_str(), nullptr);
+            FILE* file = nullptr;
+            if (::_wfopen_s(&file, path.c_str(), L"wt") == 0 && file) {
+                WriteUnderground1LaunchLines(file, world_->TrackNumber());
+                std::fclose(file);
+            }
+        }
         return;
     }
     const float heading = std::fmod(Degrees(camera.Yaw()) + 360.0f, 360.0f);
@@ -1987,8 +2126,37 @@ void MainWindow::WriteLaunchPose() {
     FILE* file = nullptr;
     if (::_wfopen_s(&file, path.c_str(), L"wt") != 0 || !file) return;
     std::fprintf(file, "pose %.3f %.3f %.3f %.2f\n", eye.x, eye.y, ground, heading);
+    // Need for Speed Underground: FRSFastTest starts the track whose region is
+    // open, so the pose lands in the city it was taken in.
+    if (world_->IsUnderground1()) {
+        WriteUnderground1LaunchLines(file, track);
+        if (track != world_->TrackNumber())
+            SetStatusText(2, Format(L"Only track %u has ground here: the game starts that track", track));
+    }
     std::fclose(file);
     LOG_INFO("launch pose (%.1f, %.1f, %.1f) heading %.1f", eye.x, eye.y, ground, heading);
+}
+
+// Need for Speed Underground's launch, after the pose: the track to start
+// (the one whose course has ground there), the game in the view, and a
+// drive rather than a race (FRSFastTest: no fly-by, no pre-race, no
+// countdown, no map). The race furniture is hidden: every model whose name
+// says race barrier or chevron ("hide <hash>"); the race barriers' walls are
+// out of the free roam's collision (io/U1FreeRoam.h, written at launch).
+void MainWindow::WriteUnderground1LaunchLines(FILE* file, u32 track) {
+    launchTrack_ = track;
+    if (track) std::fprintf(file, "track %u\n", track);
+    std::fprintf(file, "embedded\nfreeroam\n");
+    size_t hidden = 0;
+    for (const nfs::SolidObject* model : world_->AllModels()) {
+        const std::string& name = model->name;
+        if (name.find("TRACKBARRIER") != std::string::npos || name.find("TRACKTURNBARRIER") != std::string::npos ||
+            name.find("CHEVRON") != std::string::npos) {
+            std::fprintf(file, "hide %08X\n", model->hash);
+            ++hidden;
+        }
+    }
+    LOG_INFO("launch: free roam on track %u, %zu race furniture models hidden", track, hidden);
 }
 
 void MainWindow::StopGame() {
@@ -2150,7 +2318,6 @@ void MainWindow::ImportEditedObjectsImpl() {
 
 void MainWindow::ImportObj(const std::wstring& path, bool quick, const Vec3* newOrigin) {
     if (!world_) return;
-    if (RefuseReadOnlyWorld()) return;
 
     // Everything that needs the region is read first, because the region has to
     // be closed before the file can be written: the editor keeps the stream in a
@@ -2746,6 +2913,107 @@ void MainWindow::OpenRegion(std::wstring region) {
     // The whole point of opening a region is to look at it, so parse and upload
     // everything right away rather than leaving an empty viewport behind.
     LoadAllSections();
+
+    // Need for Speed Underground: the section table lives in every track's
+    // bundle; sections an edit moved or resized reach the game through
+    // bundles written again (io/U1TrackBundles.h). Every save reopens the
+    // region, so this follows each one.
+    if (world_ && world_->IsUnderground1()) {
+        std::wstring error;
+        const size_t written = io::WriteU1TrackBundles(*world_, gameFolder_, modelsFolder_, error);
+        if (!error.empty()) {
+            LOG_WARN("track bundles: %S", error.c_str());
+            ::MessageBoxW(window_, (L"The track bundles that tell the game where the edited sections are could not "
+                                    L"be written: " + error + L".").c_str(), kWindowTitle, MB_ICONWARNING | MB_OK);
+        } else if (written) {
+            SetStatusText(2, Format(L"%zu track bundles updated with the edited sections", written));
+        }
+    }
+
+    // FRS_U1_EDIT_SELFTEST=1: in a few sections a shipped object moved 5 m and
+    // another deleted, the save planned into a scratch folder (nothing reaches
+    // the game's), every rebuilt section checked -- a valid scenery tree, and
+    // read back the same edits -- and the editor's state put back.
+    if (_wgetenv(L"FRS_U1_EDIT_SELFTEST") && world_ && world_->IsUnderground1()) {
+        wchar_t temp[MAX_PATH] = {};
+        ::GetTempPathW(MAX_PATH, temp);
+        const std::wstring scratch = std::wstring(temp) + L"frs-u1-edit-selftest";
+        ::CreateDirectoryW(scratch.c_str(), nullptr);
+        std::vector<size_t> touched;
+        for (size_t s = 0; s < world_->Loaded().size() && touched.size() < 6; ++s) {
+            nfs::LoadedSection* section = world_->MutableLoaded(s);
+            if (!section->info || world_->IsLibrary(*section) || section->scenery.instances.size() < 2) continue;
+            for (int k = 0; k < 2; ++k) {
+                const nfs::SceneryInstance& instance = section->scenery.instances[(size_t)k];
+                section->removedNatives.push_back({ instance.sceneryNumber, instance.record });
+                if (k == 0) {
+                    nfs::PlacedInstance placed;
+                    placed.modelHash = section->scenery.ModelHash(instance);
+                    placed.transform = instance.transform;
+                    placed.transform.m[3][0] += 5.0f;
+                    placed.flags = (u16)instance.flags;
+                    placed.infoTemplate = section->scenery.infos[instance.infoIndex].raw;
+                    if (const nfs::SolidObject* model = world_->FindModel(placed.modelHash)) placed.modelBounds = model->bounds;
+                    section->placements.push_back({ instance.sceneryNumber, placed });
+                }
+            }
+            section->placementsChanged = true;
+            touched.push_back(s);
+        }
+        PlacementSavePlan plan;
+        const bool planned = PlanPlacementSave(*world_, scratch, plan);
+        size_t good = 0, bad = 0;
+        for (const SectionSpan& span : plan.spans) {
+            if (span.layoutFile) continue;
+            const nfs::Section* section = nullptr;
+            for (size_t s : touched)
+                if (span.name.find("(section " + world_->Loaded()[s]->info->name + ")") != std::string::npos)
+                    section = world_->Loaded()[s]->info;
+            if (!section) continue;
+            std::vector<SectionEdit> found;
+            std::wstring why;
+            bool ok = DiffSectionBytes(*world_, *section, ByteSpan{ span.bytes.data(), span.bytes.size() },
+                                       span.fileOffset, found, why);
+            size_t deleted = 0, placedCount = 0;
+            for (const SectionEdit& e : found) {
+                if (e.kind == SectionEdit::Kind::NativeDeleted) ++deleted;
+                else if (e.kind == SectionEdit::Kind::Placement) ++placedCount;
+                else ok = false;
+            }
+            nfs::ChunkReader reader(ByteSpan{ span.bytes.data(), span.bytes.size() }, span.fileOffset);
+            nfs::Chunk chunk;
+            while (ok && reader.Next(chunk)) {
+                if (chunk.id != nfs::kChunkTrackScenery) continue;
+                std::string invalid;
+                if (!nfs::ValidateScenery(ByteSpan{ chunk.raw.data - 8, chunk.raw.size + 8 }, chunk.headerOffset,
+                                          invalid)) {
+                    ok = false;
+                    LOG_WARN("u1 edit self-test %s: %s", section->name.c_str(), invalid.c_str());
+                }
+            }
+            ok = ok && deleted == 2 && placedCount == 1;
+            (ok ? good : bad)++;
+            LOG_INFO("u1 edit self-test %s: %zu bytes at %llu, %zu deleted, %zu placed: %s %S", section->name.c_str(),
+                     span.bytes.size(), (unsigned long long)span.fileOffset, deleted, placedCount, ok ? "OK" : "FAILED",
+                     why.c_str());
+        }
+        LOG_INFO("u1 edit self-test: planned %s, %zu sections OK, %zu failed, %zu spans; report:\n%S",
+                 planned ? "yes" : "NO", good, bad, plan.spans.size(), plan.report.c_str());
+        for (size_t s : touched) {   // as it was
+            nfs::LoadedSection* section = world_->MutableLoaded(s);
+            section->removedNatives.clear();
+            section->placements.clear();
+            section->placementsChanged = false;
+        }
+    }
+
+    // FRS_U1_FREEROAM_TEST=<track>: the free roam's track bundle written as
+    // a launch would, without launching (checked by tools outside).
+    if (const wchar_t* test = _wgetenv(L"FRS_U1_FREEROAM_TEST"); test && world_ && world_->IsUnderground1()) {
+        io::U1FreeRoamReport report;
+        const bool ok = io::WriteU1FreeRoamBundle(gameFolder_, (u32)_wtoi(test), world_->Underground1Tracks(), report);
+        LOG_INFO("free roam test: %s %S", ok ? "written" : "FAILED", ok ? report.path.c_str() : report.error.c_str());
+    }
 }
 
 void MainWindow::CloseRegion() {
@@ -3488,14 +3756,6 @@ bool MainWindow::ConfirmUnsavedPlacements() {
         explicit Asking(bool& f) : flag(f) { flag = true; }
         ~Asking() { flag = false; }
     } guard(asking);
-    // Nothing of an Underground 1 region can be written: the edits just go.
-    if (world_->IsUnderground1()) {
-        for (const auto& section : world_->Loaded()) {
-            section->placementsChanged = false;
-            section->collisionChanged = false;
-        }
-        return true;
-    }
     const int answer = ::MessageBoxW(
         window_,
         L"There are placed objects or collision edits that have not been written to the game.\n\n"

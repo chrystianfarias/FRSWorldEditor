@@ -281,6 +281,8 @@ void World::Close() {
     layoutUnpacked_.clear();
     layoutUnpacked_.shrink_to_fit();
     trackCollision_.clear();
+    regionTracks_.clear();
+    allTracks_.clear();
     game_ = Game::Underground2;
     trackNumber_ = 0;
     stream_.Close();
@@ -945,16 +947,47 @@ bool World::OpenUnderground1(const std::wstring& tracksDirectory, const std::wst
     for (const auto* list : { &empty, &full, &sameDigit, &otherDigit })
         order.insert(order.end(), list->begin(), list->end());
 
+    // The first that fits is opened; every other track that names a part of
+    // this region lends its collision (Underground1GroundBelow).
+    regionTracks_.clear();
+    const auto collisionOf = [](u32 number, ByteSpan bundle) {
+        TrackCollision track;
+        track.track = number;
+        ParseCollisionPolygons(TopLevelChunk(bundle, kChunkTrackCollisionU1), track.polygons);
+        for (const CollisionPolygon& polygon : track.polygons)
+            if (!polygon.barrier)
+                for (const Vec3& c : polygon.corners) track.bounds.Add(c);
+        return track;
+    };
+    // At most a few dozen bundles are read for their collision (a converted
+    // region can list eighty races over one collision), and a collision
+    // already held is not kept twice.
+    constexpr size_t kMostBundles = 24;
+    size_t bundlesRead = 0;
+    std::unordered_set<u64> collisionsHeld;
     for (u32 number : order) {
+        const bool regionPart = std::find(parts.begin(), parts.end(), number) != parts.end();
+        if (!layoutUnpacked_.empty() && (!regionPart || bundlesRead >= kMostBundles)) break;
+        ++bundlesRead;
         const std::wstring path = tracksDirectory + L"\\TRACKB" + std::to_wstring(number) + L".LZC";
         std::vector<u8> unpacked = UnpackTrackBundle(path);
         if (unpacked.empty()) continue;
-        const ByteSpan sizes = TopLevelChunk(ByteSpan{ unpacked.data(), unpacked.size() }, kChunkStreamSizesU1);
+        const ByteSpan bundle{ unpacked.data(), unpacked.size() };
+        const ByteSpan sizes = TopLevelChunk(bundle, kChunkStreamSizesU1);
         if (sizes.size < 8 || sizes.read<u32>(4) != stream_.Size()) continue;
-        layoutUnpacked_ = std::move(unpacked);
-        trackNumber_ = number;
-        break;
+        const ByteSpan polygons = TopLevelChunk(bundle, kChunkTrackCollisionU1);
+        u64 fingerprint = 1469598103934665603ull ^ polygons.size;
+        for (size_t i = 0; i < polygons.size; i += 7) fingerprint = (fingerprint ^ polygons.data[i]) * 1099511628211ull;
+        if (collisionsHeld.insert(fingerprint).second) regionTracks_.push_back(collisionOf(number, bundle));
+        if (layoutUnpacked_.empty()) {
+            layoutUnpacked_ = std::move(unpacked);
+            trackNumber_ = number;
+        }
     }
+    LOG_INFO("Underground 1 region %S: %zu tracks", region.c_str(), regionTracks_.size());
+    allTracks_ = parts;
+    if (trackNumber_ && std::find(allTracks_.begin(), allTracks_.end(), trackNumber_) == allTracks_.end())
+        allTracks_.insert(allTracks_.begin(), trackNumber_);
     if (layoutUnpacked_.empty()) {
         LOG_ERROR("Underground 1 region %S: no TRACKB<n>.LZC describes STREAM%S.BUN", region.c_str(),
                   region.c_str());
@@ -971,6 +1004,20 @@ bool World::OpenUnderground1(const std::wstring& tracksDirectory, const std::wst
         return false;
     }
     preculler_.Parse(layout, true);
+
+    // The edits from the models folder, as for Underground 2: meshes and
+    // sections of the stream, and the table corrections (spans over the open
+    // track's unpacked bundle; the game is handed every track's bundle with
+    // them, io/U1TrackBundles.h).
+    overlays_.clear();
+    spans_.clear();
+    if (!overlayFolder_.empty()) {
+        const size_t meshes = ReadMeshOverlays(overlayFolder_, region, overlays_);
+        const size_t spans = ReadSpanOverlays(overlayFolder_, region, spans_);
+        LOG_INFO("models folder %S: %zu edited meshes, %zu rebuilt spans", overlayFolder_.c_str(), meshes, spans);
+        for (const SpanOverlay& span : spans_)
+            if (span.layoutFile) table_.ApplyBytes(span.fileOffset, span.bytes.data(), span.bytes.size());
+    }
 
     // Positions: the outline of each drivable section's zone (zone id =
     // section number); a detail section (<letter>11..19) sits on its
@@ -1056,6 +1103,45 @@ void World::SplitTrackCollision() {
     }
     LOG_INFO("Underground 1 collision: %zu polygons over %zu sections (%zu with no zone)", polygons.size(),
              trackCollision_.size(), unplaced);
+}
+
+bool World::Underground1GroundBelow(float x, float y, float ceiling, float& height, u32& track) const {
+    for (const TrackCollision& candidate : regionTracks_) {
+        if (!candidate.bounds.Valid() || x < candidate.bounds.min.x || x > candidate.bounds.max.x ||
+            y < candidate.bounds.min.y || y > candidate.bounds.max.y)
+            continue;
+        bool found = false;
+        for (const CollisionPolygon& polygon : candidate.polygons) {
+            if (polygon.barrier) continue;
+            const Vec3* c = polygon.corners;
+            for (int half = 0; half < (polygon.quad ? 2 : 1); ++half) {
+                const Vec3& a = c[0];
+                const Vec3& b = half ? c[2] : c[1];
+                const Vec3& d = half ? c[3] : c[2];
+                const float den = (b.y - d.y) * (a.x - d.x) + (d.x - b.x) * (a.y - d.y);
+                if (std::fabs(den) < 1e-6f) continue;
+                const float u = ((b.y - d.y) * (x - d.x) + (d.x - b.x) * (y - d.y)) / den;
+                const float v = ((d.y - a.y) * (x - d.x) + (a.x - d.x) * (y - d.y)) / den;
+                const float w = 1.0f - u - v;
+                if (u < -1e-4f || v < -1e-4f || w < -1e-4f) continue;
+                const float z = u * a.z + v * b.z + w * d.z;
+                if (z > ceiling) continue;
+                if (!found || z > height) height = z;
+                found = true;
+            }
+        }
+        if (found) {
+            track = candidate.track;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<u32> World::Underground1Tracks() const {
+    std::vector<u32> out;
+    for (const TrackCollision& track : regionTracks_) out.push_back(track.track);
+    return out;
 }
 
 void World::NameUnderground1Scenery(LoadedSection& section) const {

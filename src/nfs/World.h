@@ -135,6 +135,16 @@ public:
     bool EmptyCity() const { return emptyCity_; }
     // Underground 1: the track whose bundle the region was opened with.
     u32  TrackNumber() const { return trackNumber_; }
+    // Underground 1 has collision only along each race's course, and each
+    // track's bundle has its own: the ground under (x, y), no higher than
+    // `ceiling`, on the open track if it has some there, else on any other
+    // track of the region -- and which track that is.
+    bool Underground1GroundBelow(float x, float y, float ceiling, float& height, u32& track) const;
+    // The region's tracks (their bundles name this stream), the open one first.
+    std::vector<u32> Underground1Tracks() const;
+    // Every track the region lists (a STREAM<region>_<n>.BUN part each), and
+    // the open one: the bundles a table correction has to reach.
+    const std::vector<u32>& Underground1AllTracks() const { return allTracks_; }
 
     const std::wstring& Region() const { return region_; }
     const SectionTable& Table()  const { return table_; }
@@ -282,6 +292,13 @@ private:
     // Underground 1's collision, one pack per drivable section (by zone).
     std::unordered_map<u32, CollisionPack> trackCollision_;
     void SplitTrackCollision();
+    struct TrackCollision {
+        u32 track = 0;
+        std::vector<CollisionPolygon> polygons;
+        Aabb bounds;
+    };
+    std::vector<TrackCollision> regionTracks_;   // the open track first
+    std::vector<u32> allTracks_;
     void NameUnderground1Scenery(LoadedSection& section) const;
     FileMap      stream_;   // STREAML4Rx.BUN
     std::vector<std::unique_ptr<FileMap>>     globalFiles_;
