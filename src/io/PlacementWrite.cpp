@@ -29,11 +29,14 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
     const auto& loaded = world.Loaded();
 
     // Models from outside the region (nfs/ForeignModels.h) placed anywhere: they
-    // go into the region's library -- its largest section with a texture pack
-    // -- with their textures, where every section sees them. Half the
-    // positioned sections have no texture pack to take a texture in.
+    // go into the region's library, where every section sees them. Half the
+    // positioned sections have no texture pack to take a texture in. The
+    // library keeps models and textures apart -- in L4RA the X sections hold
+    // only models (X0) and the Y sections only textures (Y0) -- so the model
+    // goes to the largest library section with models and its textures to the
+    // largest one with textures, which may be the same section.
     std::vector<u32> foreign;
-    size_t library = SIZE_MAX;
+    size_t library = SIZE_MAX, textureLibrary = SIZE_MAX;
     if (!nfs::ForeignSources().empty()) {
         for (const auto& section : loaded)
             for (const auto& placement : section->placements) {
@@ -42,21 +45,24 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
                 if (std::find(foreign.begin(), foreign.end(), hash) == foreign.end()) foreign.push_back(hash);
             }
         if (!foreign.empty()) {
+            const auto larger = [&](size_t i, size_t than) {
+                return than == SIZE_MAX || loaded[i]->info->originalStreamSize > loaded[than]->info->originalStreamSize;
+            };
             for (size_t i = 0; i < loaded.size(); ++i) {
-                if (!loaded[i]->info || !world.IsLibrary(*loaded[i]) || loaded[i]->texturePacks.empty() ||
-                    loaded[i]->solidLists.empty())
-                    continue;
-                if (library == SIZE_MAX || loaded[i]->info->originalStreamSize > loaded[library]->info->originalStreamSize)
-                    library = i;
+                if (!loaded[i]->info || !world.IsLibrary(*loaded[i])) continue;
+                if (!loaded[i]->solidLists.empty() && larger(i, library)) library = i;
+                if (!loaded[i]->texturePacks.empty() && larger(i, textureLibrary)) textureLibrary = i;
             }
-            if (library == SIZE_MAX) {
-                report << L"The region has no library section with models and textures to take in the models "
-                          L"from outside it. Left alone.\n";
+            if (library == SIZE_MAX || textureLibrary == SIZE_MAX) {
+                report << L"The region has no library section to take in the "
+                       << (library == SIZE_MAX ? L"models" : L"textures") << L" of the models from outside it. "
+                       << L"Left alone.\n";
                 plan.ok = false;
                 foreign.clear();
+                library = textureLibrary = SIZE_MAX;
             } else {
-                LOG_INFO("placements: %zu models from outside the region go to library section %s", foreign.size(),
-                         loaded[library]->info->name.c_str());
+                LOG_INFO("placements: %zu models from outside the region go to library section %s, their textures to %s",
+                         foreign.size(), loaded[library]->info->name.c_str(), loaded[textureLibrary]->info->name.c_str());
             }
         }
     }
@@ -65,7 +71,10 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
     for (size_t index = 0; index < loaded.size(); ++index) {
         const nfs::LoadedSection& section = *loaded[index];
         const bool takesForeign = index == library && !foreign.empty();
-        if (!(section.placementsChanged || section.collisionChanged || takesForeign) || !section.info) continue;
+        const bool takesForeignTextures = index == textureLibrary && !foreign.empty();
+        if (!(section.placementsChanged || section.collisionChanged || takesForeign || takesForeignTextures) ||
+            !section.info)
+            continue;
         const nfs::Section& entry = *section.info;
         const std::wstring name(entry.name.begin(), entry.name.end());
 
@@ -226,6 +235,9 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
             kept.push_back(std::move(model));
             ++copiedModels;
 
+            // A model from outside the region has its textures put in the
+            // texture library instead, when that is another section.
+            if (isForeign(hash) && !takesForeignTextures) continue;
             std::wstring problem;
             for (NewTexture& texture : TexturesToCopy(world, hash, index, problem)) {
                 const bool had = std::any_of(kept.begin(), kept.end(), [&](const SectionEdit& e) {
@@ -245,6 +257,32 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
                 report << name << L": " << problem << L"Left alone.\n";
                 failed = true;
                 break;
+            }
+        }
+        // The textures of the models from outside the region, when they live
+        // apart from the models (the Y sections of L4RA).
+        if (!failed && takesForeignTextures && !takesForeign) {
+            for (const u32 hash : foreign) {
+                std::wstring problem;
+                for (NewTexture& texture : TexturesToCopy(world, hash, index, problem)) {
+                    const bool had = std::any_of(kept.begin(), kept.end(), [&](const SectionEdit& e) {
+                        return (e.kind == SectionEdit::Kind::TextureAdded ||
+                                e.kind == SectionEdit::Kind::TextureChanged) && e.hash == texture.hash;
+                    });
+                    if (had) continue;
+                    SectionEdit edit;
+                    edit.kind = SectionEdit::Kind::TextureAdded;
+                    edit.hash = texture.hash;
+                    edit.label = texture.name;
+                    edit.texture = std::move(texture);
+                    kept.push_back(std::move(edit));
+                    ++copiedTextures;
+                }
+                if (!problem.empty()) {
+                    report << name << L": " << problem << L"Left alone.\n";
+                    failed = true;
+                    break;
+                }
             }
         }
         if (failed) { plan.ok = false; continue; }
