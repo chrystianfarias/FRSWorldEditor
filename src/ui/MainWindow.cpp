@@ -31,6 +31,7 @@
 #include "ui/Resource.h"
 #include "ui/MarkersExtension.h"
 #include "ui/RoadsExtension.h"
+#include "ui/U1Library.h"
 #include "ui/SetupWizard.h"
 #include "ui/WorldDialogs.h"
 
@@ -686,6 +687,8 @@ void MainWindow::OnCreate() {
     // After the private ones: a click tries what stands in front of a beacon first.
     extensions_.push_back(CreateMarkersExtension(*this));
     extensions_.push_back(CreateRoadsExtension(*this));
+    // Need for Speed Underground's models in the library (ui/U1Library.h).
+    extensions_.push_back(CreateU1Library(*this));
     // The mesh editor (ui/MeshTools.h), asked before the collision tools so
     // that while it edits, Ctrl+Z steps its own edit back.
     {
@@ -1428,13 +1431,16 @@ void MainWindow::RunSetup() {
     StoreSetupVersion(kSetupVersion);
     StoreGameFolder(folder);
     if (folder != gameFolder_ || !world_) SetGameFolder(folder);
+    // The other games' model libraries (ui/U1Library.h, ...) read their folders again.
+    ::PostMessageW(window_, WM_COMMAND, ID_LIBRARY_FOLDERS_CHANGED, 0);
 }
 
 void MainWindow::ShowAbout() {
     const int answer = ::MessageBoxW(
         window_,
         L"FRS World Editor 0.1.0\n"
-        L"A map editor for Need for Speed Underground 2.\n\n"
+        L"A world editor for the Need for Speed games of the Black Box era: it edits Underground 2's "
+        L"worlds and reads Underground's and Most Wanted's.\n\n"
         L"Created by Chrystian Farias.\n\n"
         L"Licensed under Creative Commons Attribution-NonCommercial 4.0 (CC BY-NC 4.0): you may "
         L"share and adapt it, crediting Chrystian Farias, and not for commercial purposes -- it may "

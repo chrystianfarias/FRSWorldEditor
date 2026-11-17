@@ -21,6 +21,7 @@ add_executable(FRSWorldEditor WIN32
     src/io/CollisionGenerate.cpp
     src/io/MeshOverlay.cpp
     src/io/ModelCopy.cpp
+    src/io/U1Convert.cpp
     src/io/ObjMesh.cpp
     src/io/PlacementWrite.cpp
     src/io/SectionRebuild.cpp
@@ -58,6 +59,7 @@ add_executable(FRSWorldEditor WIN32
     src/nfs/EaCompress.cpp
     src/nfs/WorldAnimation.cpp
     src/nfs/World.cpp
+    src/nfs/ForeignModels.cpp
 
     # MINIMAP PREVIEW (temporary)
     src/minimap/MinimapBuildings.cpp
@@ -107,6 +109,7 @@ add_executable(FRSWorldEditor WIN32
     src/ui/CollisionTools.cpp
     src/ui/MeshTools.cpp
     src/ui/ModelCatalog.cpp
+    src/ui/U1Library.cpp
     src/ui/SetupWizard.cpp
     src/ui/WorldDialogs.cpp
 

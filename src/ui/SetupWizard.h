@@ -26,6 +26,9 @@
 
 struct SetupChoices {
     std::wstring folder;
+    // Every game's folder, empty for one not set. `folder` is the one whose
+    // worlds the editor opens; the others lend their models to the library.
+    std::wstring underground2Folder, underground1Folder, mostWantedFolder;
     bool asiLoader = true;       // copy dinput8.dll (only when no loader is there)
     bool fastBoot = true;
     bool fastBootAlways = false; // fast boot on every start, not only from the editor
@@ -41,6 +44,16 @@ bool IsGameFolder(const std::wstring& folder);
 // A Need for Speed Underground (the first) folder: speed.exe, no SPEED2.EXE.
 // The editor reads its tracks; the plugins are not for it.
 bool IsUnderground1Folder(const std::wstring& folder);
+// A Need for Speed Most Wanted folder: speed.exe and TRACKS\L2RA.BUN.
+bool IsMostWantedFolder(const std::wstring& folder);
+
+// The folder of another game whose models join the model library, as the
+// setup stored it ("Underground1", "MostWanted"); empty when there is none.
+std::wstring OtherGameFolder(const wchar_t* game);
+void StoreOtherGameFolder(const wchar_t* game, const std::wstring& folder);
+// Where Need for Speed Underground is installed, as far as the registry and
+// the usual places know.
+std::wstring DetectUnderground1Folder();
 
 // Where the game is installed, as far as the registry and the usual places
 // know. Empty when it was not found.

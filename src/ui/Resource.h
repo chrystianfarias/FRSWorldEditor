@@ -102,6 +102,10 @@
 #define IDD_MY_OBJECTS         280
 #define IDC_MINE_LIST          2901
 
+// Sent to every editor extension after the setup changed the other games' folders
+// (ui/SetupWizard.h, OtherGameFolder): their model libraries read them again.
+#define ID_LIBRARY_FOLDERS_CHANGED 46900
+
 // Commands from 47000 up are left to editor extensions (ui/EditorExtension.h).
 #define ID_EXTENSION_FIRST     47000
 
@@ -163,6 +167,13 @@
 #define IDC_SETUP_PARTS_NOTE   2710
 #define IDC_SETUP_RESULT       2711
 #define IDC_SETUP_LINK         2712
+#define IDC_SETUP_U1_PATH      2713
+#define IDC_SETUP_U1_BROWSE    2714
+#define IDC_SETUP_MW_PATH      2715
+#define IDC_SETUP_MW_BROWSE    2716
+#define IDC_SETUP_U1_STATUS    2717
+#define IDC_SETUP_MW_STATUS    2718
+#define IDC_SETUP_MAIN         2719
 
 // Worlds (sets of edits)
 #define IDD_NEW_WORLD          270

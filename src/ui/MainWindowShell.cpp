@@ -365,7 +365,11 @@ void MainWindow::DrawShellLibrary() {
         const int current = (int)::SendMessageW(libShelf_, CB_GETCURSEL, 0, 0);
         wchar_t text[200] = {};
         if (current >= 0) ::SendMessageW(libShelf_, CB_GETLBTEXT, (WPARAM)current, (LPARAM)text);
-        ImGui::SetNextItemWidth(-FLT_MIN);
+        // The game filter beside it, once the library holds more than one
+        // game's models (nfs/ForeignModels.h).
+        const std::vector<std::wstring> games = catalog_.Games();
+        const float gameWidth = games.size() > 1 ? std::min(150.0f, ImGui::GetContentRegionAvail().x * 0.4f) : 0.0f;
+        ImGui::SetNextItemWidth(games.size() > 1 ? -(gameWidth + ImGui::GetStyle().ItemSpacing.x) : -FLT_MIN);
         const char* currentIcon = ShelfIcon(text);
         std::wstring shown = text;
         while (!shown.empty() && shown[0] == L' ') shown.erase(0, 1);
@@ -383,6 +387,20 @@ void MainWindow::DrawShellLibrary() {
                 }
             }
             ImGui::EndCombo();
+        }
+        if (games.size() > 1) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            const std::wstring& game = catalog_.GameFilter();
+            const std::string label = std::string(ICON_PH_GAME_CONTROLLER) + "  " +
+                                      (game.empty() ? std::string("All games") : Utf8(game));
+            if (ImGui::BeginCombo("##game", label.c_str())) {
+                if (ImGui::Selectable("All games", game.empty())) catalog_.SetGameFilter(L"");
+                for (const std::wstring& g : games)
+                    if (ImGui::Selectable(Utf8(g).c_str(), game == g)) catalog_.SetGameFilter(g);
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Which game's models; File > Game Folder and Plugins sets the other games' folders.");
         }
         bool used = ::SendMessageW(libUsed_, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (ImGui::Checkbox("Only models the map places", &used)) {

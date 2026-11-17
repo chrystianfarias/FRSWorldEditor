@@ -40,6 +40,7 @@ double SecondsNow() {
 void WorldRenderer::Clear() {
     objectByHash_.clear();
     for (RenderExtension* extension : extensions_) extension->ReleaseGpu();
+    foreignGpu_.clear();
     selectedOwner_ = nullptr;
     selectedExtra_ = -1;
     ReleaseThumbnailTargets();
@@ -142,6 +143,7 @@ void WorldRenderer::SyncWithWorld(const nfs::World& world) {
 void WorldRenderer::BuildInstances(const nfs::World& world) {
     unresolvedInstances_ = 0;
     duplicateInstances_  = 0;
+    foreignGpu_.clear();
 
     // Where each model ended up on the GPU.
     std::unordered_map<u32, std::pair<u32, u32>> modelIndex;
@@ -245,11 +247,23 @@ void WorldRenderer::BuildInstances(const nfs::World& world) {
         const auto& edited = loaded[i]->placements;
         for (size_t p = 0; p < edited.size(); ++p) {
             const nfs::PlacedInstance& placed = edited[p].instance;
-            const auto it = modelIndex.find(placed.modelHash);
-            if (it == modelIndex.end()) { unresolvedInstances_++; continue; }
+            auto it = modelIndex.find(placed.modelHash);
+            if (it == modelIndex.end()) {
+                // A model from outside the region (nfs/ForeignModels.h),
+                // drawn from an extension's copy until a save brings it in.
+                const GpuSection* gpu = nullptr;
+                const GpuObject* object = nullptr;
+                for (RenderExtension* extension : extensions_)
+                    if (extension->FindModel(placed.modelHash, gpu, object)) break;
+                if (!gpu || !object || gpu->Objects().empty()) { unresolvedInstances_++; continue; }
+                size_t slot = std::find(foreignGpu_.begin(), foreignGpu_.end(), gpu) - foreignGpu_.begin();
+                if (slot == foreignGpu_.size()) foreignGpu_.push_back(gpu);
+                it = modelIndex.emplace(placed.modelHash,
+                                        std::make_pair((u32)(kForeignSection + slot),
+                                                       (u32)(object - gpu->Objects().data()))).first;
+            }
 
-            const nfs::SolidObject* model =
-                sections_[it->second.first].gpu->Objects()[it->second.second].source;
+            const nfs::SolidObject* model = GpuOf(it->second.first)->Objects()[it->second.second].source;
 
             GpuInstance gpuInstance;
             gpuInstance.section   = it->second.first;
@@ -281,7 +295,7 @@ void WorldRenderer::UpdatePlacement(u32 loadedSection, int placement, const Mat4
     if (loadedSection >= sections_.size()) return;
     for (GpuInstance& instance : sections_[loadedSection].instances) {
         if (instance.placement != placement) continue;
-        const GpuSection* owner = sections_[instance.section].gpu.get();
+        const GpuSection* owner = GpuOf(instance.section);
         const nfs::SolidObject* model =
             owner && instance.object < owner->Objects().size() ? owner->Objects()[instance.object].source
                                                                 : nullptr;
@@ -494,7 +508,9 @@ void WorldRenderer::DrawTranslucent(IDirect3DDevice9* device, RenderStats& stats
 
     BeginTranslucentStates(device);
     for (const TranslucentObject& item : translucent_) {
-        const GpuSection& gpu = *sections_[item.section].gpu;
+        const GpuSection* itemGpu = GpuOf(item.section);
+        if (!itemGpu) continue;
+        const GpuSection& gpu = *itemGpu;
         device->SetStreamSource(0, gpu.VertexBuffer(), 0, sizeof(nfs::SolidVertex));
         device->SetIndices(gpu.IndexBuffer());
         if (backfaceCulling_)
@@ -603,7 +619,7 @@ void WorldRenderer::Render(const Camera& camera) {
     size_t boundSection = (size_t)-1;
     auto bind = [&](size_t index) {
         if (boundSection == index) return;
-        const GpuSection& gpu = *sections_[index].gpu;
+        const GpuSection& gpu = *GpuOf((u32)index);
         device->SetStreamSource(0, gpu.VertexBuffer(), 0, sizeof(nfs::SolidVertex));
         device->SetIndices(gpu.IndexBuffer());
         boundSection = index;
@@ -692,7 +708,7 @@ void WorldRenderer::Render(const Camera& camera) {
             if (!previewed && culling_ && instance.worldBounds.Valid() &&
                 !frustum.Intersects(instance.worldBounds)) continue;
 
-            const GpuObject& object = sections_[instance.section].gpu->Objects()[instance.object];
+            const GpuObject& object = GpuOf(instance.section)->Objects()[instance.object];
             if (BackdropHidden(object)) continue;
             if (BackdropOutOfZone(object, section.number)) continue;   // Game look: not in the camera's zone list
             if (HiddenBuilding(object)) continue;   // MINIMAP PREVIEW (temporary)
@@ -848,8 +864,7 @@ bool WorldRenderer::CheckReferences(const std::wstring& path) const {
     std::vector<float> errors;
     for (const SectionRender& section : sections_) {
         for (const GpuInstance& instance : section.instances) {
-            if (instance.section >= sections_.size()) continue;
-            const GpuSection* owner = sections_[instance.section].gpu.get();
+            const GpuSection* owner = GpuOf(instance.section);
             if (!owner || instance.object >= owner->Objects().size()) continue;
 
             const nfs::SolidObject* model = owner->Objects()[instance.object].source;
@@ -952,8 +967,7 @@ bool WorldRenderer::DumpPlacements(const std::wstring& path) const {
         }
 
         for (const GpuInstance& instance : section.instances) {
-            if (instance.section >= sections_.size()) continue;
-            const GpuSection* owner = sections_[instance.section].gpu.get();
+            const GpuSection* owner = GpuOf(instance.section);
             if (!owner || instance.object >= owner->Objects().size()) continue;
 
             const nfs::SolidObject* source = owner->Objects()[instance.object].source;
@@ -1021,8 +1035,8 @@ bool WorldRenderer::InstanceEdited(const SectionRender& section, const GpuInstan
     if (instance.native >= 0 && !editedNatives_.empty() &&
         editedNatives_.count(InstanceKey(section.name, instance.native, -1)))
         return true;
-    if (instance.section >= sections_.size() || !sections_[instance.section].gpu) return false;
-    const auto& objects = sections_[instance.section].gpu->Objects();
+    if (!GpuOf(instance.section)) return false;
+    const auto& objects = GpuOf(instance.section)->Objects();
     if (instance.object >= objects.size() || !objects[instance.object].source) return false;
     const nfs::SolidObject& model = *objects[instance.object].source;
     if (editedModels_.count(model.hash)) return true;
@@ -1052,8 +1066,7 @@ bool WorldRenderer::Pick(const Ray& ray, PickResult& out) const {
         for (size_t k = 0; k < section.instances.size(); ++k) {
             const GpuInstance& instance = section.instances[k];
             if (hiddenHere[k]) continue;
-            const GpuObject& object =
-                sections_[instance.section].gpu->Objects()[instance.object];
+            const GpuObject& object = GpuOf(instance.section)->Objects()[instance.object];
             PickOne(ray, object, instance.transform, instance.worldBounds, true, i,
                     instance.section, instance.object, best, instance.placement, instance.native);
         }
@@ -1116,8 +1129,7 @@ void WorldRenderer::DrawSelection(IDirect3DDevice9* device) {
     device->SetFVF(kWorldVertexFvf);
 
     for (const PickResult& picked : selection_) {
-        if (picked.gpuSection >= sections_.size()) continue;
-        const GpuSection* owner = sections_[picked.gpuSection].gpu.get();
+        const GpuSection* owner = GpuOf((u32)picked.gpuSection);
         if (!owner || picked.gpuObject >= owner->Objects().size()) continue;
 
         const GpuObject& object = owner->Objects()[picked.gpuObject];
@@ -1494,7 +1506,7 @@ bool WorldRenderer::SelectPlacement(u32 loadedSection, int placement) {
     if (loadedSection >= sections_.size()) return false;
     for (const GpuInstance& instance : sections_[loadedSection].instances) {
         if (instance.placement != placement) continue;
-        const GpuSection* owner = sections_[instance.section].gpu.get();
+        const GpuSection* owner = GpuOf(instance.section);
         if (!owner || instance.object >= owner->Objects().size()) return false;
 
         PickResult picked;
@@ -1935,7 +1947,7 @@ std::vector<minimap::PlacedModel> WorldRenderer::PlacedBuildings() const {
     for (const SectionRender& section : sections_) {
         if (section.alternate && !showAlternate_) continue;
         for (const GpuInstance& instance : section.instances) {
-            const GpuSection* gpu = sections_[instance.section].gpu.get();
+            const GpuSection* gpu = GpuOf(instance.section);
             if (!gpu || instance.object >= gpu->Objects().size()) continue;
             const nfs::SolidObject* model = gpu->Objects()[instance.object].source;
             if (model && minimap::IsMinimapBuilding(*model))
@@ -2536,14 +2548,14 @@ void WorldRenderer::VisitSolidDraws(IDirect3DDevice9* device, const Aabb& bounds
         for (size_t k = 0; k < section.instances.size(); ++k) {
             const GpuInstance& instance = section.instances[k];
             if (hiddenHere[k] || !overlaps(instance.worldBounds)) continue;
-            const GpuObject& object = sections_[instance.section].gpu->Objects()[instance.object];
+            const GpuObject& object = GpuOf(instance.section)->Objects()[instance.object];
             if (BackdropHidden(object) || HiddenBuilding(object) || HiddenModel(object) || GameHidesModel(object))
                 continue;
             for (const GpuDraw& d : object.draws) {
                 const CachedTexture& texture = textures_.Get(device, AnimatedTexture(d.textureHash));
                 if (texture.texture && texture.Translucent()) continue;
                 if (boundSection != instance.section) {
-                    const GpuSection& gpu = *sections_[instance.section].gpu;
+                    const GpuSection& gpu = *GpuOf(instance.section);
                     device->SetStreamSource(0, gpu.VertexBuffer(), 0, sizeof(nfs::SolidVertex));
                     device->SetIndices(gpu.IndexBuffer());
                     boundSection = instance.section;

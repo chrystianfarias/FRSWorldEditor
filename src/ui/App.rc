@@ -284,16 +284,26 @@ END
 // ---------------------------------------------------------------------------
 // The setup wizard (ui/SetupWizard.cpp)
 
-IDD_SETUP_FOLDER DIALOGEX 0, 0, 300, 150
+IDD_SETUP_FOLDER DIALOGEX 0, 0, 300, 170
 STYLE DS_SETFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
 FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
-    LTEXT           "The editor reads the city straight from the game's own files. Point it at the folder that holds SPEED2.EXE -- nothing in the game is changed by this.",
-                    -1, 0, 0, 300, 28
-    LTEXT           "&Game folder:", -1, 0, 36, 300, 10
-    EDITTEXT        IDC_SETUP_PATH, 0, 48, 236, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "&Browse...", IDC_SETUP_BROWSE, 242, 47, 58, 16
-    LTEXT           "", IDC_SETUP_FOLDER_STATUS, 0, 72, 300, 60
+    LTEXT           "FRS World Editor works with the Need for Speed games of the Black Box era. Show it where yours are: each one is optional, and nothing in a game is changed by this.",
+                    -1, 0, 0, 300, 20
+    LTEXT           "Need for Speed &Underground 2", -1, 0, 27, 236, 10
+    EDITTEXT        IDC_SETUP_PATH, 0, 38, 236, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_SETUP_BROWSE, 242, 37, 58, 16
+    LTEXT           "", IDC_SETUP_FOLDER_STATUS, 0, 54, 300, 10
+    LTEXT           "Need for Speed U&nderground", -1, 0, 69, 236, 10
+    EDITTEXT        IDC_SETUP_U1_PATH, 0, 80, 236, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_SETUP_U1_BROWSE, 242, 79, 58, 16
+    LTEXT           "", IDC_SETUP_U1_STATUS, 0, 96, 300, 10
+    LTEXT           "Need for Speed &Most Wanted", -1, 0, 111, 236, 10
+    EDITTEXT        IDC_SETUP_MW_PATH, 0, 122, 236, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_SETUP_MW_BROWSE, 242, 121, 58, 16
+    LTEXT           "", IDC_SETUP_MW_STATUS, 0, 138, 300, 10
+    LTEXT           "&Edit the worlds of:", -1, 0, 156, 70, 10
+    COMBOBOX        IDC_SETUP_MAIN, 72, 154, 228, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 END
 
 IDD_SETUP_PARTS DIALOGEX 0, 0, 300, 170
@@ -337,7 +347,7 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName",      "Chrystian Farias"
-            VALUE "FileDescription",  "FRS World Editor - a map editor for Need for Speed Underground 2"
+            VALUE "FileDescription",  "FRS World Editor - a world editor for the Need for Speed games of the Black Box era"
             VALUE "FileVersion",      "0.2.5"
             VALUE "InternalName",     "FRSWorldEditor"
             VALUE "LegalCopyright",   "(c) 2026 Chrystian Farias. CC BY-NC 4.0"

@@ -591,6 +591,18 @@ private:
     u32                thumbSize_     = 0;
 
     std::vector<SectionRender> sections_;
+    // Models from outside the region (nfs/ForeignModels.h: another game's,
+    // shown by an extension's GPU copy): an instance placing one names
+    // kForeignSection + its slot here instead of a section of the region.
+    static constexpr u32 kForeignSection = 0x40000000u;
+    std::vector<const GpuSection*> foreignGpu_;
+    const GpuSection* GpuOf(u32 section) const {
+        if (section >= kForeignSection) {
+            const size_t slot = section - kForeignSection;
+            return slot < foreignGpu_.size() ? foreignGpu_[slot] : nullptr;
+        }
+        return section < sections_.size() ? sections_[section].gpu.get() : nullptr;
+    }
     size_t       uploadedSections_ = 0;
     TextureCache textures_;
     std::vector<TranslucentObject> translucent_;
