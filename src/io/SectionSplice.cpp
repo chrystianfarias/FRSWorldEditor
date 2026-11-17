@@ -72,17 +72,36 @@ std::vector<u8> SpliceSection(ByteSpan section, std::vector<ChunkEdit> edits, bo
         out.resize(std::max(UsedLength(out), section.size), 0);
     if (out.size() < section.size) out.resize(section.size, 0);
     out.resize((size_t)AlignUp(out.size(), 16), 0);
-    if (wholeChunks) {
-        const size_t used = UsedLength(out);
-        if ((out.size() - used) % 8) out.resize(out.size() + 8 - (out.size() - used) % 8, 0);
-    }
+    if (wholeChunks) EndOnChunk(out);
     return out;
+}
+
+void EndOnChunk(std::vector<u8>& bytes) {
+    // Walked as the game walks it: lands exactly on the end, or the tail
+    // after the last real chunk becomes one zero-id chunk that does. (Testing
+    // the tail's length alone missed an old 124-byte filler: a multiple of 8
+    // in all, yet the walk stopped 4 bytes short and the game crashed.)
+    size_t at = 0;
+    while (at + 8 <= bytes.size()) at += 8 + (size_t)Read32(bytes, at + 4);
+    if (at == bytes.size()) return;
+    const size_t used = UsedLength(bytes);
+    size_t tail = bytes.size() - used;
+    if (tail < 8) {
+        bytes.resize(bytes.size() + 16, 0);
+        tail += 16;
+    }
+    std::fill(bytes.begin() + (std::ptrdiff_t)used, bytes.end(), (u8)0);
+    const u32 size = (u32)(tail - 8);
+    std::memcpy(bytes.data() + used + 4, &size, 4);
 }
 
 void PlanSectionSpans(const nfs::World& world, const nfs::Section& section,
                       std::vector<u8> bytes, const std::vector<SpanOverlayInfo>& existing,
                       const std::string& label, SectionSpanPlan& out) {
     const ByteSpan stream = world.StreamBytes();
+    // Need for Speed Underground walks the section to exactly its size
+    // (0x447AC0): whichever path built these bytes, they end on a chunk.
+    if (world.IsUnderground1()) EndOnChunk(bytes);
 
     // Whether [at, at + size) is free: inside the stream it may not cross the
     // stream's end, and it may not overlap another section where the table now

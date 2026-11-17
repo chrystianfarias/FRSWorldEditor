@@ -745,6 +745,51 @@ bool RenameObjectChunk(const nfs::World& world, SectionEdit& edit, const Mat4& p
     std::memset(edit.chunk.data() + at + nameAt, 0, room);
     std::memcpy(edit.chunk.data() + at + nameAt, name.data(), name.size());
 
+    // Need for Speed Underground draws the road reflection where the mesh
+    // descriptor +0x0C has 0x40 and each material +0x20 = 0 / +0x38 = 0x40
+    // (else 0xFF / 0): its TRS*_ROAD pieces, and nothing else. All 109 of
+    // them also carry chunk 0x134013 (8 bytes an entry), which header bit
+    // 0x00400000 and the count at +0x1A announce -- on every model, crowd and
+    // all, that has one: not a road mark. Setting the bit and a count on a
+    // piece without the chunk had the game read an entry that is not there,
+    // and it fell over entering the world; header and chunk stay the
+    // template's. The new object is marked by its own textures (road when one
+    // is RDP_), reflecting only when the template brought the chunk.
+    if (nameAt == 0x94) {
+        bool road = false;
+        const nfs::Chunk refs = nfs::FindChunk(wrapper, nfs::kChunkSolidObjectTexRefs);
+        for (size_t r = 0; refs.id && r + 4 <= refs.data.size; r += 8) {
+            const u32 textureHash = refs.data.read<u32>(r);
+            const nfs::Texture* texture = world.FindTexture(textureHash);
+            if (!texture) texture = nfs::FindForeignTexture(textureHash);
+            if (texture && texture->name.rfind("RDP_", 0) == 0) road = true;
+        }
+        const bool lit = (header.data.read<u32>(0x0C) & 0x00400000u) != 0 && header.data.read<u8>(0x1A) != 0 &&
+                         nfs::FindChunk(wrapper, 0x00134013u).id != 0;
+        const bool reflect = road && lit;
+        const nfs::Chunk meshes = nfs::FindChunk(wrapper, nfs::kChunkMeshContainer);
+        if (meshes.id) {
+            const nfs::Chunk descriptor = nfs::FindChunk(meshes, nfs::kChunkMeshDescriptor);
+            if (descriptor.id && descriptor.data.size >= 0x10) {
+                u8* at0c = edit.chunk.data() + (descriptor.data.data - edit.chunk.data()) + 0x0C;
+                u32 flags = 0;
+                std::memcpy(&flags, at0c, 4);
+                flags = reflect ? (flags | 0x40u) : (flags & ~0x40u);
+                std::memcpy(at0c, &flags, 4);
+            }
+            const nfs::Chunk materials = nfs::FindChunk(meshes, nfs::kChunkMeshMaterials);
+            for (size_t m = 0; materials.id && m + 60 <= materials.data.size; m += 60) {
+                u8* entry = edit.chunk.data() + (materials.data.data - edit.chunk.data()) + m;
+                u32 strip = 0;
+                std::memcpy(&strip, entry + 0x38, 4);
+                strip = reflect ? (strip | 0x40u) : (strip & ~0x40u);
+                const u32 mark = reflect ? 0u : 0xFFu;
+                std::memcpy(entry + 0x20, &mark, 4);
+                std::memcpy(entry + 0x38, &strip, 4);
+            }
+        }
+    }
+
     edit.kind = SectionEdit::Kind::ModelAdded;
     edit.hash = hash;
     edit.label = name;

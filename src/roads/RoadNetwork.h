@@ -35,7 +35,19 @@ struct RoadProfile {
     // yellow line), every other lane with `laneInner` (a dashed white one).
     std::string laneCentre = "RDP_LANEA_YS_AA_KT";
     std::string laneInner  = "RDP_LANEB_WD_AA_KT";
+    // The outermost lane of each side, when that is not the centre lane;
+    // empty: laneInner. (Need for Speed Underground's kerb lanes carry litter,
+    // RDP_ROADSTRIP_BG.)
+    std::string laneOuter;
     float textureLength    = 32.0f;   // road length one repeat of a lane texture covers
+    // Where across the lane texture its line is (0..1), for a texture that
+    // does not have it on its edge: the texture is slid so the line lands on
+    // the lane's edge. The games' own lane textures (Underground 2's
+    // RDP_LANE*, Need for Speed Underground's RDP_ROADSTRIP_* -- whose two
+    // centre strips meet at u 0 on its own roads) have it at 0.
+    float laneLineAt       = 0.0f;
+    // Road length one repeat of the sidewalk texture covers; 0: textureLength.
+    float sidewalkTextureLength = 0.0f;
 
     // Raised sidewalks on either edge; width 0 leaves them out.
     float sidewalkWidth   = 0.0f;
@@ -48,6 +60,10 @@ struct RoadProfile {
     float wallHeight = 1.2f;
     std::string wallTexture = "ARC_BARRIERTYPEFWY_WH";
     float wallTextureLength = 8.0f;
+    // The flat wall's texture turned on the wall, in quarter turns (0..3):
+    // Underground 2's freeway wall runs its height along u, Need for Speed
+    // Underground's ARC_BARRIERTYPE1 along v.
+    int   wallTextureTurn = 0;
 
     // Street lights: a game model stood along the road every `poleSpacing`,
     // on the right, the left, both sides or alternating. Empty: none.
@@ -193,6 +209,9 @@ struct RoadProfile {
         // The outer edge comes down (or up) to the ground there -- the game's,
         // or terrain made in the editor -- so the two meet without a gap.
         bool  meetGround = true;
+        // Its textures (grass, grass-into-rock, rock) turned on the ground, in
+        // quarter turns (0..3).
+        int   textureTurn = 0;
         float Width() const {
             float w = 0.0f;
             for (const TerrainBand& b : bands) w += b.width;
@@ -212,6 +231,9 @@ struct RoadProfile {
     std::string wallModel;
     float wallModelSpacing = 4.0f;
     float wallModelTurn = 0.0f;
+    // The model's place against the road edge: outwards (negative: towards
+    // the road), up, and along the road; and a tilt about the road's line.
+    float wallModelOut = 0.0f, wallModelUp = 0.0f, wallModelAlong = 0.0f;
 
     // Traffic and the GPS: whether the game's traffic drives this road, whether
     // the player's GPS (and the racers) may route over it, and the speed the
@@ -278,6 +300,9 @@ struct Pole {
     std::string model;
     Vec3  position;
     float heading = 0.0f;     // degrees
+    // Tilted with the road (a wall's model, not a street light), in degrees:
+    // nfs::ComposePlacement's pitch and roll.
+    float pitch = 0.0f, roll = 0.0f;
     u32   segment = 0;
     Vec3  lamp;               // where the light comes from
     u32   color = 0;
@@ -624,6 +649,10 @@ public:
     struct LightSources {
         std::function<bool(const Vec3& point, u32& colour)> sample;
         std::vector<Pole> lamps;
+        // The region's own night (RRGGBB), where `sample` finds no ground:
+        // used in place of the road profile's ambient when set.
+        bool hasAmbient = false;
+        u32  ambient = 0;
     };
     void SetLightSources(std::shared_ptr<const LightSources> sources) { light_ = std::move(sources); SetDirty(); }
     const LightSources* Lighting() const { return light_.get(); }
@@ -660,6 +689,12 @@ public:
     // A game model's bounds in its own space, for the pillars built of one.
     using ModelBounds = std::function<bool(const std::string& model, Vec3& min, Vec3& max)>;
     void SetModelBounds(ModelBounds query) { modelBounds_ = std::move(query); }
+    // A game model's triangles in its own space, a group per texture: what a
+    // wall of a model is built of (copied into a mesh of its own, not placed
+    // as the model -- a model kept in a section the game has not loaded there
+    // is not there to draw, and the game fell over it).
+    using ModelMesh = std::function<bool(const std::string& model, std::vector<MeshGroup>& groups)>;
+    void SetModelMesh(ModelMesh query) { modelMesh_ = std::move(query); SetDirty(); }
 
     // The game's buildings the zones choose from (ClassifyBuilding).
     void SetBuildingModels(std::vector<BuildingModel> models) { buildings_ = std::move(models); SetDirty(); }
@@ -671,11 +706,17 @@ public:
     const std::string& RockMixTexture() const { return rockMixTexture_; }
     // The region's rock for steep ground, and its grass-into-rock texture
     // between the two (empty: none, grass straight into rock).
-    void SetRockTextures(const std::string& rock, const std::string& mix) {
+    // `strip`: the rock is a strip lying down -- grass along its top edge,
+    // rock along the bottom, repeating along u (Need for Speed Underground's
+    // TRN_SHORELINE_ROCKSA) -- laid along the road, grass edge up to the
+    // grass; Underground 2's cliffs stand up, repeating along v.
+    void SetRockTextures(const std::string& rock, const std::string& mix, bool strip = false) {
         rockTexture_ = rock;
         rockMixTexture_ = mix;
+        rockStrip_ = strip;
         SetDirty();
     }
+    bool RockStrip() const { return rockStrip_; }
     // Ground filling every area the roads close all round (optional, saved).
     bool FillBetween() const { return fillBetween_; }
     void SetFillBetween(bool on) { fillBetween_ = on; SetDirty(); }
@@ -705,9 +746,11 @@ private:
     std::vector<Water> waters_;
     GroundQuery ground_;
     ModelBounds modelBounds_;
+    ModelMesh modelMesh_;
     std::vector<BuildingModel> buildings_;
     std::string groundTexture_ = "TRN_OLDTOWNGRASS";
     std::string rockTexture_ = "TRN_ROCKCLIFFA_KT", rockMixTexture_ = "TRN_GRASSACLIFFA";
+    bool rockStrip_ = false;
     std::shared_ptr<const LightSources> light_;
 
     // The zoned buildings along every road, after the roads themselves: each

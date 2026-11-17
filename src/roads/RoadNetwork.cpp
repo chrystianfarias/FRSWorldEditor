@@ -138,12 +138,13 @@ struct LanePaint { std::string texture; bool mirrored; };
 std::vector<LanePaint> LanePaints(const RoadProfile& p) {
     std::vector<LanePaint> out;
     const int lanes = p.Lanes();
+    const std::string& outer = p.laneOuter.empty() ? p.laneInner : p.laneOuter;
     for (int k = 0; k < lanes; ++k) {
         if (k < p.lanesBackward) {
             // Left of the centre line: the marking is on the side towards it.
-            out.push_back({ k == p.lanesBackward - 1 ? p.laneCentre : p.laneInner, true });
+            out.push_back({ k == p.lanesBackward - 1 ? p.laneCentre : k == 0 ? outer : p.laneInner, true });
         } else {
-            out.push_back({ k == p.lanesBackward ? p.laneCentre : p.laneInner, false });
+            out.push_back({ k == p.lanesBackward ? p.laneCentre : k == lanes - 1 ? outer : p.laneInner, false });
         }
     }
     return out;
@@ -388,8 +389,8 @@ void BuildStretch(const RoadProfile& p, const std::vector<Station>& stations, si
         for (size_t k = 0; k < paints.size() && !crossing; ++k) {
             const float x0 = laneStart(k);
             const float x1 = x0 + lane;
-            const float u0 = paints[k].mirrored ? 1.0f : 0.0f;
-            const float u1 = 1.0f - u0;
+            const float u0 = paints[k].mirrored ? 1.0f + p.laneLineAt : p.laneLineAt;
+            const float u1 = paints[k].mirrored ? p.laneLineAt : 1.0f + p.laneLineAt;
             const float v0 = s0.distance / p.textureLength;
             const float v1 = s1.distance / p.textureLength;
             MeshGroup& g = piece.Group(paints[k].texture);
@@ -476,8 +477,9 @@ void BuildStretch(const RoadProfile& p, const std::vector<Station>& stations, si
             const float h0 = h * (1.0f - taper.WalkLow(side, s0.distance));
             const float h1 = h * (1.0f - taper.WalkLow(side, s1.distance));
             if (taper.WalkClosed(side, s0.distance) > 0.999f && taper.WalkClosed(side, s1.distance) > 0.999f) continue;
-            const float v0 = s0.distance / p.textureLength;
-            const float v1 = s1.distance / p.textureLength;
+            const float walkTile = p.sidewalkTextureLength > 0.5f ? p.sidewalkTextureLength : p.textureLength;
+            const float v0 = s0.distance / walkTile;
+            const float v1 = s1.distance / walkTile;
             const float kerbU = std::clamp(h / std::max(p.sidewalkWidth, 0.01f), 0.0f, 1.0f);
             const float inner = half * side;
             const float outer = (half + p.sidewalkWidth) * side;
@@ -510,6 +512,15 @@ void BuildStretch(const RoadProfile& p, const std::vector<Station>& stations, si
             const float v1 = s1.distance / p.wallTextureLength;
             if (p.wallStyle == 0) {
                 if (rise0 < 0.01f && rise1 < 0.01f) continue;
+                // The texture turned on the wall a quarter at a time.
+                const int turn = ((p.wallTextureTurn % 4) + 4) % 4;
+                const auto WallVertex = [turn](const Vec3& position, const Vec3& normal, float u, float v, u32 c) {
+                    float tu = u, tv = v;
+                    if (turn == 1) { tu = v; tv = -u; }
+                    else if (turn == 2) { tu = -u; tv = -v; }
+                    else if (turn == 3) { tu = -v; tv = u; }
+                    return Vertex(position, normal, tu, tv, c);
+                };
                 const float top0 = base0 + rise0, top1 = base1 + rise1;
                 const float depth = std::clamp(p.wallThickness, 0.0f, 5.0f);
                 const float uh0 = rise0 / std::max(0.01f, p.wallHeight + depth);
@@ -517,9 +528,9 @@ void BuildStretch(const RoadProfile& p, const std::vector<Station>& stations, si
                 if (depth < 0.01f) {
                     for (int face = -1; face <= 1; face += 2) {
                         const Vec3 n = s0.right * (float)face;
-                        AddQuad(g, Vertex(at(s0, x, base0), n, 0, v0, color), Vertex(at(s0, x, top0), n, rise0 / std::max(0.01f, p.wallHeight), v0, color),
-                                Vertex(at(s1, x, top1), n, rise1 / std::max(0.01f, p.wallHeight), v1, color),
-                                Vertex(at(s1, x, base1), n, 0, v1, color), n);
+                        AddQuad(g, WallVertex(at(s0, x, base0), n, 0, v0, color), WallVertex(at(s0, x, top0), n, rise0 / std::max(0.01f, p.wallHeight), v0, color),
+                                WallVertex(at(s1, x, top1), n, rise1 / std::max(0.01f, p.wallHeight), v1, color),
+                                WallVertex(at(s1, x, base1), n, 0, v1, color), n);
                     }
                     continue;
                 }
@@ -528,19 +539,19 @@ void BuildStretch(const RoadProfile& p, const std::vector<Station>& stations, si
                 const float out = x + depth * (float)side;
                 const float ud = depth / std::max(0.01f, p.wallHeight + depth);
                 const Vec3 inward = s0.right * (float)-side, outward = s0.right * (float)side;
-                AddQuad(g, Vertex(at(s0, x, base0), inward, 0, v0, color), Vertex(at(s0, x, top0), inward, uh0, v0, color),
-                        Vertex(at(s1, x, top1), inward, uh1, v1, color), Vertex(at(s1, x, base1), inward, 0, v1, color),
+                AddQuad(g, WallVertex(at(s0, x, base0), inward, 0, v0, color), WallVertex(at(s0, x, top0), inward, uh0, v0, color),
+                        WallVertex(at(s1, x, top1), inward, uh1, v1, color), WallVertex(at(s1, x, base1), inward, 0, v1, color),
                         inward);
-                AddQuad(g, Vertex(at(s0, out, base0), outward, 0, v0, color),
-                        Vertex(at(s0, out, top0), outward, uh0, v0, color), Vertex(at(s1, out, top1), outward, uh1, v1, color),
-                        Vertex(at(s1, out, base1), outward, 0, v1, color), outward);
-                AddQuad(g, Vertex(at(s0, x, top0), up, uh0, v0, color), Vertex(at(s0, out, top0), up, uh0 + ud, v0, color),
-                        Vertex(at(s1, out, top1), up, uh1 + ud, v1, color), Vertex(at(s1, x, top1), up, uh1, v1, color), up);
+                AddQuad(g, WallVertex(at(s0, out, base0), outward, 0, v0, color),
+                        WallVertex(at(s0, out, top0), outward, uh0, v0, color), WallVertex(at(s1, out, top1), outward, uh1, v1, color),
+                        WallVertex(at(s1, out, base1), outward, 0, v1, color), outward);
+                AddQuad(g, WallVertex(at(s0, x, top0), up, uh0, v0, color), WallVertex(at(s0, out, top0), up, uh0 + ud, v0, color),
+                        WallVertex(at(s1, out, top1), up, uh1 + ud, v1, color), WallVertex(at(s1, x, top1), up, uh1, v1, color), up);
                 const float last = stations.back().distance;
                 const auto cap = [&](const Station& s, float facing, float b, float t, float uh) {
                     const Vec3 n = s.forward * facing;
-                    AddQuad(g, Vertex(at(s, x, b), n, 0, 0, color), Vertex(at(s, x, t), n, 0, uh, color),
-                            Vertex(at(s, out, t), n, ud, uh, color), Vertex(at(s, out, b), n, ud, 0, color), n);
+                    AddQuad(g, WallVertex(at(s, x, b), n, 0, 0, color), WallVertex(at(s, x, t), n, 0, uh, color),
+                            WallVertex(at(s, out, t), n, ud, uh, color), WallVertex(at(s, out, b), n, ud, 0, color), n);
                 };
                 const bool startsHere = s0.distance <= 1e-3f || (i > 0 && !taper.WallAt(side, stations[i - 1].distance,
                                                                                           s0.distance));
@@ -821,25 +832,51 @@ void Bank(const RoadProfile& p, const Curve& curve, std::vector<Station>& statio
 void PlaceWallModels(const Segment& segment, const std::vector<Station>& stations, std::vector<Pole>& out) {
     const RoadProfile& p = segment.profile;
     if (p.wallStyle != 2 || p.wallModel.empty() || p.wallModelSpacing < 0.5f || stations.size() < 2) return;
-    const float total = stations.back().distance;
     for (int side = -1; side <= 1; side += 2) {
         if (!p.Wall(side)) continue;
+        // The wall's own line, and how far along it each station is: spaced
+        // along the road's middle, the copies drew apart round the outside
+        // of a bend and crowded together on the inside.
+        const float lateral = (p.Edge(side) + p.wallModelOut) * side;
+        const float lift = (p.Walk(side) ? p.sidewalkHeight : 0.0f) + p.wallModelUp;
+        std::vector<Vec3> line(stations.size());
+        std::vector<float> length(stations.size(), 0.0f);
+        for (size_t k = 0; k < stations.size(); ++k) {
+            line[k] = stations[k].At(lateral, lift);
+            if (k) {
+                const Vec3 d = line[k] - line[k - 1];
+                length[k] = length[k - 1] + std::sqrt(d.x * d.x + d.y * d.y);
+            }
+        }
+        const float total = length.back();
         size_t cursor = 0;
         for (float at = p.wallModelSpacing * 0.5f; at < total; at += p.wallModelSpacing) {
-            while (cursor + 1 < stations.size() - 1 && stations[cursor + 1].distance < at) ++cursor;
-            const Station& s0 = stations[cursor];
-            const Station& s1 = stations[cursor + 1];
-            const float f = std::clamp((at - s0.distance) / std::max(1e-4f, s1.distance - s0.distance), 0.0f, 1.0f);
-            Station s = s0;
-            s.point = s0.point + (s1.point - s0.point) * f;
-            s.bank = s0.bank + (s1.bank - s0.bank) * f;
-            const Vec3 forward = HorizontalDirection(s0.forward + (s1.forward - s0.forward) * f, s0.forward);
-            s.right = RightOf(forward);
+            while (cursor + 2 < stations.size() && length[cursor + 1] < at) ++cursor;
+            const float span = std::max(1e-4f, length[cursor + 1] - length[cursor]);
+            const float f = std::clamp((at - length[cursor]) / span, 0.0f, 1.0f);
+            const Vec3 d = line[cursor + 1] - line[cursor];
+            const float run = std::sqrt(d.x * d.x + d.y * d.y);
+            const Vec3 forward = run > 1e-4f ? Vec3{ d.x / run, d.y / run, 0.0f }
+                                             : HorizontalDirection(stations[cursor].forward, stations[cursor].forward);
             Pole piece;
             piece.model = p.wallModel;
             piece.segment = segment.id;
-            piece.position = s.At(p.Edge(side) * side, p.Walk(side) ? p.sidewalkHeight : 0.0f);
+            piece.position = line[cursor] + d * f + forward * p.wallModelAlong;
             piece.heading = Degrees(std::atan2(forward.y, forward.x)) + p.wallModelTurn + (side < 0 ? 180.0f : 0.0f);
+            // Up and down with the road: the wall line's grade here, along
+            // the way the copy faces (backwards on the left), shared between
+            // the model's own X (pitch) and Y (roll) by how far it is turned
+            // off the road.
+            {
+                const float grade = run > 1e-3f ? d.z / run : 0.0f;          // tan of the slope, forwards
+                const float along = side < 0 ? -grade : grade;
+                const float t = Radians(p.wallModelTurn);
+                const float slopeX = std::atan(along * std::cos(t));
+                const float slopeY = std::atan(-along * std::sin(t));
+                piece.pitch = -Degrees(slopeX);
+                const float cp = std::cos(slopeX);
+                piece.roll = Degrees(std::asin(std::clamp(std::sin(slopeY) / std::max(cp, 1e-3f), -1.0f, 1.0f)));
+            }
             piece.lamp = piece.position;
             piece.radius = 1.0f;
             piece.strength = 0.0f;
@@ -1039,8 +1076,8 @@ Vec2 Project(const Vec3& q, int projection, float tile) {
 // grass-and-rock texture, then rock -- the thresholds jittered so the edge is
 // ragged. Grass collision, row by row.
 void BuildSideTerrain(const RoadProfile& p, const std::vector<Station>& stations, const std::string& grass,
-                      const std::string& rockTexture, const std::string& mixTexture, SideContext& context,
-                      MeshPiece& piece) {
+                      const std::string& rockTexture, const std::string& mixTexture, bool rockStrip,
+                      SideContext& context, MeshPiece& piece) {
     if (stations.size() < 2) return;
     constexpr float kGrassTile = 24.0f, kRockTile = 14.0f;
     const auto smooth = [](float e0, float e1, float x) {
@@ -1170,7 +1207,10 @@ void BuildSideTerrain(const RoadProfile& p, const std::vector<Station>& stations
         // rock along the other, a ragged line between. It is laid across the
         // band between the two limits -- grass edge against the grass, rock
         // edge against the rock -- and runs on along the road.
-        const float limits[2] = { mixTexture.empty() ? 0.5f : 0.43f, mixTexture.empty() ? 0.5f : 0.57f };
+        // A strip lying down is the whole way from grass to rock: given a
+        // wider band.
+        const float spread = mixTexture.empty() ? 0.0f : rockStrip ? 0.16f : 0.07f;
+        const float limits[2] = { 0.5f - spread, 0.5f + spread };
 
         const std::string names[3] = { t.texture.empty() ? grass : t.texture, mixTexture, rockTexture };
         struct Point { Vec3 p, n; float w, along, up; };
@@ -1200,8 +1240,22 @@ void BuildSideTerrain(const RoadProfile& p, const std::vector<Station>& stations
             MeshVertex v;
             v.position = q.p;
             v.normal = q.n;
-            if (g == 0) v.uv = Project(q.p, 0, kGrassTile);
-            else if (g == 1) {
+            if (g == 0 && rockStrip) {
+                // Need for Speed Underground lays its grass on the ground's
+                // own surface -- u along, v up the slope -- 10 m a repeat
+                // (TRN_GRASSC on its TRS*_TERRAIN pieces); seen from above
+                // the projection stretched it down every steep face.
+                v.uv = { -q.along / 10.0f, -q.up / 10.0f };
+            } else if (g == 0) v.uv = Project(q.p, 0, kGrassTile);
+            else if (rockStrip) {
+                // As on its own shores (TRSABG_HARBOUR_INLET): along the road
+                // in u, 40 m a repeat; v down the strip from its grass edge
+                // to its rock, once over 20 m of slope -- rock at the foot,
+                // grass towards the top -- mirrored beyond so no seam shows.
+                const float f = q.up / 20.0f;
+                const float mirrored = 1.0f - std::fabs((f - std::floor(f)) * 2.0f - 1.0f);
+                v.uv = { -q.along / 40.0f, 0.97f - 0.94f * mirrored };
+            } else if (g == 1) {
                 const float across = std::clamp((q.w - limits[0]) / std::max(1e-4f, limits[1] - limits[0]), 0.0f, 1.0f);
                 v.uv = { 0.03f + 0.94f * across, -q.along / 20.0f };
             } else {
@@ -1211,6 +1265,13 @@ void BuildSideTerrain(const RoadProfile& p, const std::vector<Station>& stations
                 const float f = q.up / 20.0f;
                 const float mirrored = 1.0f - std::fabs((f - std::floor(f)) * 2.0f - 1.0f);
                 v.uv = { 0.02f + 0.96f * mirrored, -q.along / 24.0f };
+            }
+            // Turned as asked, a quarter at a time.
+            switch (((t.textureTurn % 4) + 4) % 4) {
+                case 1: v.uv = { v.uv.y, -v.uv.x }; break;
+                case 2: v.uv = { -v.uv.x, -v.uv.y }; break;
+                case 3: v.uv = { -v.uv.y, v.uv.x }; break;
+                default: break;
             }
             group.vertices.push_back(v);
             return (u32)(group.vertices.size() - 1);
@@ -1631,7 +1692,8 @@ void LightPieces(std::vector<MeshPiece>& pieces, const std::vector<Pole>& poles,
                  const Network::LightSources* sources) {
     for (MeshPiece& piece : pieces) {
         const RoadProfile* profile = profileOf(piece);
-        const u32 ambient = profile ? profile->ambient : 0x383C42;
+        const u32 ambient = sources && sources->hasAmbient ? sources->ambient
+                                                           : profile ? profile->ambient : 0x383C42;
         const Aabb box = piece.Bounds();
         const auto reaching = [&](const std::vector<Pole>& list) {
             std::vector<const Pole*> out;
@@ -3234,7 +3296,43 @@ std::vector<MeshPiece> Network::BuildMesh(std::vector<Pole>* polesOut) const {
             }
             if (!posts.walls.empty()) pieces.push_back(std::move(posts));
         }
-        PlaceWallModels(s, stations, poles);
+        // A wall of a model: every copy along the road in one mesh of the
+        // road's own, ROAD_W<segment>, the model's triangles turned and
+        // tilted with each copy and its textures with them.
+        {
+            std::vector<Pole> copies;
+            PlaceWallModels(s, stations, copies);
+            std::vector<MeshGroup> model;
+            if (!copies.empty() && modelMesh_ && modelMesh_(s.profile.wallModel, model)) {
+                MeshPiece wall;
+                char wallName[48];
+                std::snprintf(wallName, sizeof(wallName), "ROAD_W%u", s.id);
+                wall.name = wallName;
+                wall.segment = s.id;
+                for (const Pole& copy : copies) {
+                    // nfs::ComposePlacement's rows: roll about x, pitch about
+                    // y, heading about z.
+                    const float h = Radians(copy.heading), pt = Radians(copy.pitch), r = Radians(copy.roll);
+                    const float ch = std::cos(h), sh = std::sin(h), cp = std::cos(pt), sp = std::sin(pt);
+                    const float cr = std::cos(r), sr = std::sin(r);
+                    const Vec3 rx{ cp * ch, cp * sh, -sp };
+                    const Vec3 ry{ -cr * sh + sr * sp * ch, cr * ch + sr * sp * sh, sr * cp };
+                    const Vec3 rz{ sr * sh + cr * sp * ch, -sr * ch + cr * sp * sh, cr * cp };
+                    for (const MeshGroup& source : model) {
+                        MeshGroup& g = wall.Group(source.texture);
+                        const u32 base = (u32)g.vertices.size();
+                        for (const MeshVertex& v : source.vertices) {
+                            MeshVertex w = v;
+                            w.position = copy.position + rx * v.position.x + ry * v.position.y + rz * v.position.z;
+                            w.normal = Normalize(rx * v.normal.x + ry * v.normal.y + rz * v.normal.z);
+                            g.vertices.push_back(w);
+                        }
+                        for (u32 index : source.indices) g.indices.push_back(base + index);
+                    }
+                }
+                if (!wall.groups.empty()) pieces.push_back(std::move(wall));
+            }
+        }
         if (s.profile.tunnel) {
             // An end is a portal when the road leaves the tunnel there.
             const auto portalAt = [&](u32 nodeId) {
@@ -3521,7 +3619,8 @@ std::vector<MeshPiece> Network::BuildMesh(std::vector<Pole>* polesOut) const {
                     context.next[end][si] = &turned;
                 }
             }
-            BuildSideTerrain(s.profile, stations, groundTexture_, rockTexture_, rockMixTexture_, context, side);
+            BuildSideTerrain(s.profile, stations, groundTexture_, rockTexture_, rockMixTexture_, rockStrip_, context,
+                             side);
             for (int end = 0; end < 2; ++end)
                 for (int si = 0; si < 2; ++si) sideEnds[{ s.id, end * 2 + si }] = context.ends[end][si];
             if (side.VertexCount()) pieces.push_back(std::move(side));
@@ -3966,6 +4065,9 @@ bool Network::Save(const std::wstring& path) const {
             << p.tunnelLightSpacing << " " << p.tunnelLightColor << " " << p.tunnelPortalSize << " "
             << p.tunnelPortalDepth << " " << Token(p.tunnelWall) << " " << Token(p.tunnelRoof) << " "
             << Token(p.tunnelPortal);
+        out << " " << p.laneLineAt << " " << p.sidewalkTextureLength << " " << p.wallTextureTurn << " "
+            << p.wallModelOut << " " << p.wallModelUp << " " << p.wallModelAlong << " " << Token(p.laneOuter) << " " << p.terrain[0].textureTurn << " "
+            << p.terrain[1].textureTurn;
         out << "\n";
     }
     for (const Water& w : waters_) {
@@ -4312,6 +4414,23 @@ bool Network::Load(const std::wstring& path) {
                                                                 p.tunnelWall = Untoken(tw);
                                                                 p.tunnelRoof = Untoken(tr);
                                                                 p.tunnelPortal = Untoken(tp);
+                                                                float lineAt = 0.0f, walkTile = 0.0f, mo = 0.0f, mu = 0.0f, ma = 0.0f;
+                                                                int wallTurn = 0;
+                                                                if (line >> lineAt >> walkTile >> wallTurn >> mo >> mu >> ma) {
+                                                                    p.laneLineAt = std::clamp(lineAt, -1.0f, 1.0f);
+                                                                    p.sidewalkTextureLength = std::clamp(walkTile, 0.0f, 200.0f);
+                                                                    p.wallTextureTurn = ((wallTurn % 4) + 4) % 4;
+                                                                    p.wallModelOut = std::clamp(mo, -20.0f, 20.0f);
+                                                                    p.wallModelUp = std::clamp(mu, -20.0f, 20.0f);
+                                                                    p.wallModelAlong = std::clamp(ma, -100.0f, 100.0f);
+                                                                    std::string outerLane;
+                                                                    if (line >> outerLane) p.laneOuter = Untoken(outerLane);
+                                                                    int turnLeft = 0, turnRight = 0;
+                                                                    if (line >> turnLeft >> turnRight) {
+                                                                        p.terrain[0].textureTurn = ((turnLeft % 4) + 4) % 4;
+                                                                        p.terrain[1].textureTurn = ((turnRight % 4) + 4) % 4;
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }

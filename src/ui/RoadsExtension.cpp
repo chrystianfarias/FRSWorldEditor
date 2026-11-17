@@ -184,7 +184,7 @@ enum Field {
     // Terrain beside: kSideTerrain + side * 40 (0 left, 1 right) + one of these;
     // band k's width and rise at + kBandWidth + 2k and + kBandRise + 2k.
     kSideTerrain = 230, kSideOn = 0, kSideRelief = 1, kSideSeed = 2, kSideTexture = 3, kSideRock = 4, kSideRockAngle = 5,
-    kSideRockHeight = 6, kSideMeet = 7, kBandWidth = 10, kBandRise = 11,
+    kSideRockHeight = 6, kSideMeet = 7, kSideTextureTurn = 8, kBandWidth = 10, kBandRise = 11,
     kLightColour = 320, kLightRadius, kLightStrength, kLightHeight, kLightModel, kLightHeading,
     kPropModel = 340, kPropHeading, kPropScale,
     kWaterLevel = 400, kWaterWidth, kWaterDepth, kWaterShore, kWaterFall, kWaterFoam, kWaterCarve, kWaterDeep,
@@ -192,6 +192,7 @@ enum Field {
     kCatsEyes = 360, kCatsEyeSpacing, kCatsEyeModel,
     kMedianType = 130, kMedianWidth, kMedianHeight, kMedianTexture, kWalkLeft, kWalkRight,
     kWallStyle, kWallModel, kWallModelSpacing, kWallModelTurn,
+    kLaneOuter = 439, kLaneLineAt = 440, kSidewalkTextureLength, kWallTextureTurn, kWallModelOut, kWallModelUp, kWallModelAlong,
     kLayerTexture = 100,     // + layer * 4: texture, tile, surface
     kLayerTile = 101, kLayerSurface = 102,
 };
@@ -508,6 +509,44 @@ public:
         app_.View().AddTool(this);
         network_.SetGroundQuery([this](float x, float y, float top, float& height) {
             return GroundBelow(x, y, top, height);
+        });
+        network_.SetModelMesh([this](const std::string& name, std::vector<roads::MeshGroup>& groups) {
+            const auto found = modelsByName_.find(Widen(name));
+            const nfs::World* world = app_.World();
+            if (found == modelsByName_.end() || !found->second || !world) return false;
+            const nfs::SolidObject& model = *found->second;
+            groups.clear();
+            for (const nfs::SolidMaterial& material : model.materials) {
+                if (material.textureIndex >= model.textureHashes.size()) continue;
+                const nfs::Texture* texture = world->FindTexture(model.textureHashes[material.textureIndex]);
+                if (!texture) continue;
+                roads::MeshGroup* group = nullptr;
+                for (roads::MeshGroup& g : groups)
+                    if (g.texture == texture->name) group = &g;
+                if (!group) {
+                    groups.push_back({});
+                    group = &groups.back();
+                    group->texture = texture->name;
+                }
+                std::unordered_map<u32, u32> remap;
+                for (u32 i = material.firstIndex; i < material.firstIndex + material.indexCount && i < model.indices.size();
+                     ++i) {
+                    const u32 source = model.indices[i];
+                    if (source >= model.vertices.size()) continue;
+                    auto [at, added] = remap.emplace(source, (u32)group->vertices.size());
+                    if (added) {
+                        const nfs::SolidVertex& sv = model.vertices[source];
+                        roads::MeshVertex v;
+                        v.position = sv.position;
+                        v.normal = sv.normal;
+                        v.uv = sv.uv;
+                        v.color = sv.color;
+                        group->vertices.push_back(v);
+                    }
+                    group->indices.push_back(at->second);
+                }
+            }
+            return !groups.empty();
         });
         network_.SetModelBounds([this](const std::string& name, Vec3& min, Vec3& max) {
             const auto found = modelsByName_.find(Widen(name));
@@ -895,6 +934,7 @@ public:
         meshRevision_ = 0;
         CollectTextureChoices(*world);
         CollectTextureSwaps(*world);
+        ApplyUnderground1Reference(*world);
         LoadNativeOriginals();
         lampOffsets_ = flares::LampOffsets(*world);
         if (!demoDone_ && std::getenv("FRS_CITY_DEMO")) {
@@ -1922,7 +1962,7 @@ public:
         for (const roads::Pole& pole : poles_) {
             const GpuSection* gpu = nullptr;
             const GpuObject* object = nullptr;
-            if (!renderer.FindGpuModel(TextureHash(pole.model), gpu, object)) continue;
+            if (!renderer.FindGpuModel(ModelHash(pole.model), gpu, object)) continue;
             renderer.BeginModels(device, *gpu);
             const D3DMATRIX world = ToD3DMatrix(PoleTransform(pole));
             device->SetTransform(D3DTS_WORLD, &world);
@@ -3039,6 +3079,16 @@ private:
         }
     }
 
+    // A model by name: the hash its header carries. Need for Speed
+    // Underground's headers keep only the first 27 characters of a long name
+    // (OSB_OILLINKFENCEA_2BEND_500...), whose hash is not the model's; only
+    // a name no model of the region has is hashed.
+    u32 ModelHash(const std::string& name) {
+        const auto found = modelsByName_.find(Widen(name));
+        if (found != modelsByName_.end() && found->second) return found->second->hash;
+        return TextureHash(name);
+    }
+
     u32 TextureHash(const std::string& name) {
         auto found = hashes_.find(name);
         if (found != hashes_.end()) return found->second;
@@ -3158,9 +3208,18 @@ private:
                 if (rock.empty() && rocky && n.find("GRASS") == std::string::npos) rock = n;
                 if (mix.empty() && rocky && n.find("GRASS") != std::string::npos) mix = n;
             }
-            network_.SetRockTextures(rock, mix);
-            LOG_INFO("roads: rock on slopes: %s, between: %s", rock.empty() ? "(none)" : rock.c_str(),
-                     mix.empty() ? "(none)" : mix.c_str());
+            // A rock texture lying down (wider than tall: Need for Speed
+            // Underground's TRN_SHORELINE_ROCKSA, grass into rock top to
+            // bottom) is its own grass-into-rock.
+            bool strip = false;
+            if (const auto found = texturesByName_.find(Widen(rock)); found != texturesByName_.end() && found->second &&
+                found->second->width >= found->second->height * 2) {
+                strip = true;
+                if (mix.empty()) mix = rock;
+            }
+            network_.SetRockTextures(rock, mix, strip);
+            LOG_INFO("roads: rock on slopes: %s, between: %s%s", rock.empty() ? "(none)" : rock.c_str(),
+                     mix.empty() ? "(none)" : mix.c_str(), strip ? " (a strip lying down, laid along the road)" : "");
             LOG_INFO("roads: ground beside roads: %s", grass.empty() ? "(default)" : grass.c_str());
         }
         std::sort(pillarModels_.begin() + 1, pillarModels_.end());
@@ -3226,7 +3285,7 @@ private:
     }
 
     static Mat4 PoleTransform(const roads::Pole& pole) {
-        return nfs::ComposePlacement(pole.position, pole.heading, 0.0f, 0.0f, pole.scale);
+        return nfs::ComposePlacement(pole.position, pole.heading, pole.pitch, pole.roll, pole.scale);
     }
 
     std::wstring PoleRecordPath() const {
@@ -4516,6 +4575,68 @@ private:
                  textureSwap_.size());
     }
 
+    // Need for Speed Underground's streets, measured on its own road pieces
+    // (TRSBFG_ROADA_CHOP1, TRSJKL_ROADA_CHOP15): lanes 3.5 m wide, one
+    // RDP_ROADSTRIP_* across each, repeating every 40 m, its line on the edge
+    // (the two AC strips meet at u 0: the double yellow); the kerb lanes
+    // RDP_ROADSTRIP_BG, with litter; against the kerb RDP_ROADSTRIP_RSHLDR1
+    // (the shoulder's texture, when the road has one); the sidewalk
+    // ARC_SIDEWALK_C, dirty, 12.5 m a repeat; ARC_BARRIERTYPE1 drawn lying
+    // down.
+    static bool Underground1Reference(roads::RoadProfile& p) {
+        bool fixed = false;
+        if (p.laneCentre == "RDP_ROADSTRIP_AC" && p.laneLineAt == 0.25f && p.laneOuter.empty()) {
+            // Written by the version that put the line a quarter in.
+            p.laneLineAt = 0.0f;
+            p.laneOuter = "RDP_ROADSTRIP_BG";
+            fixed = true;
+        }
+        if (p.sidewalkTexture == "ARC_SIDEWALK_A" && p.sidewalkTextureLength == 10.0f) {
+            // ... and the clean sidewalk, before its streets were measured.
+            p.sidewalkTexture = "ARC_SIDEWALK_C";
+            p.sidewalkTextureLength = 12.5f;
+            if (p.shoulderTexture.empty()) p.shoulderTexture = "RDP_ROADSTRIP_RSHLDR1";
+            fixed = true;
+        }
+        if (fixed) return true;
+        if (p.laneCentre.rfind("RDP_LANE", 0) != 0 && p.laneInner.rfind("RDP_LANE", 0) != 0) return false;
+        p.laneCentre = "RDP_ROADSTRIP_AC";
+        p.laneInner = "RDP_ROADSTRIP_BC";
+        p.laneOuter = "RDP_ROADSTRIP_BG";
+        p.laneWidth = 3.5f;
+        p.textureLength = 40.0f;
+        p.laneLineAt = 0.0f;
+        if (p.sidewalkTexture == "ARC_SIDEWALK_E" || p.sidewalkTexture.empty()) {
+            p.sidewalkTexture = "ARC_SIDEWALK_C";
+            p.sidewalkTextureLength = 12.5f;
+        }
+        if (p.shoulderTexture.empty()) p.shoulderTexture = "RDP_ROADSTRIP_RSHLDR1";
+        if (p.wallTexture == "ARC_BARRIERTYPEFWY_WH") {
+            p.wallTexture = "ARC_BARRIERTYPE1";
+            p.wallTextureTurn = 1;
+            p.wallTextureLength = 5.0f;
+        }
+        return true;
+    }
+
+    // Roads drawn with Underground 2's lane textures, in a Need for Speed
+    // Underground region, take its own (above); so does the next road drawn.
+    void ApplyUnderground1Reference(const nfs::World& world) {
+        if (!world.IsUnderground1()) return;
+        Underground1Reference(lastProfile_);
+        size_t changed = 0;
+        std::vector<u32> ids;
+        for (const roads::Segment& s : network_.Segments()) ids.push_back(s.id);
+        for (u32 id : ids)
+            if (roads::Segment* s = network_.FindSegment(id); s && Underground1Reference(s->profile)) ++changed;
+        if (changed) {
+            network_.SetDirty();
+            Changed(true);
+            LOG_INFO("roads: %zu roads take Need for Speed Underground's lanes, sidewalk and wall (3.5 m lanes, "
+                     "RDP_ROADSTRIP_AC/BC every 40 m)", changed);
+        }
+    }
+
     std::vector<roads::MeshPiece> ToRegionTextures(std::vector<roads::MeshPiece> pieces) const {
         if (textureSwap_.empty()) return pieces;
         for (roads::MeshPiece& piece : pieces)
@@ -5735,7 +5856,7 @@ private:
         for (const roads::Pole& pole : poles) {
             if (pole.strength <= 0.0f || pole.building) continue;
             if (!pole.model.empty()) {
-                const auto found = lampOffsets_.find(TextureNameHash(Upper(pole.model)));
+                const auto found = lampOffsets_.find(const_cast<RoadsExtension*>(this)->ModelHash(Upper(pole.model)));
                 if (found != lampOffsets_.end()) {
                     const Mat4 placed = PoleTransform(pole);
                     for (const Vec3& lamp : found->second) out.push_back(placed.TransformPoint(lamp));
@@ -6605,6 +6726,31 @@ private:
                     groundModels_.push_back(std::move(g));
                 }
         }
+        // Need for Speed Underground's ground is not TRN_: its track surface
+        // pieces, TRS<sections>_ROAD.../_TERRAIN..., carry the baked light.
+        // They light the roads only; sculpting leaves them alone.
+        lightModels_.clear();
+        if (world.IsUnderground1())
+            for (const auto& loaded : world.Loaded()) {
+                if (!loaded->info || world.IsLibrary(*loaded)) continue;
+                for (const nfs::SolidList& list : loaded->solidLists)
+                    for (const nfs::SolidObject& model : list.objects) {
+                        const std::string& name = model.name;
+                        if (name.rfind("TRS", 0) != 0 || model.vertices.empty() || model.indices.empty() ||
+                            placements[model.hash] > 1)
+                            continue;
+                        if (name.find("_ROAD") == std::string::npos && name.find("_TERRAIN") == std::string::npos)
+                            continue;
+                        GroundModel g;
+                        g.model = &model;
+                        g.world.reserve(model.vertices.size());
+                        for (const nfs::SolidVertex& v : model.vertices) {
+                            g.world.push_back(model.transform.TransformPoint(v.position));
+                            g.bounds.Add(g.world.back());
+                        }
+                        lightModels_.push_back(std::move(g));
+                    }
+            }
         LOG_INFO("ground: %zu terrain meshes can be sculpted (%zu are drawn in several places and are left alone)",
                  groundModels_.size(), shared);
     }
@@ -6615,10 +6761,32 @@ private:
     static constexpr float kLightCell = 8.0f;
     static long long LightKey(int x, int y) { return ((long long)x << 32) ^ (long long)(u32)y; }
 
+    const GroundModel& LightModel(u32 m) const {
+        return m < groundModels_.size() ? groundModels_[m] : lightModels_[m - groundModels_.size()];
+    }
+
+    // The region's night where its ground is unlit: a quarter of its ground
+    // vertices are darker, per channel. Need for Speed Underground's nights
+    // are darker than the profiles' ambient, tuned on Underground 2.
+    bool RegionAmbient(u32& ambient) const {
+        std::vector<u8> channel[3];
+        for (u32 m = 0; m < groundModels_.size() + lightModels_.size(); ++m)
+            for (const nfs::SolidVertex& v : LightModel(m).model->vertices)
+                for (int k = 0; k < 3; ++k) channel[k].push_back((u8)(v.color >> (16 - 8 * k)));
+        if (channel[0].size() < 1000) return false;
+        ambient = 0;
+        for (int k = 0; k < 3; ++k) {
+            auto quarter = channel[k].begin() + (std::ptrdiff_t)(channel[k].size() / 4);
+            std::nth_element(channel[k].begin(), quarter, channel[k].end());
+            ambient |= (u32)*quarter << (16 - 8 * k);
+        }
+        return true;
+    }
+
     void BuildLightGrid() const {
         lightGrid_.clear();
-        for (u32 m = 0; m < groundModels_.size(); ++m) {
-            const GroundModel& g = groundModels_[m];
+        for (u32 m = 0; m < groundModels_.size() + lightModels_.size(); ++m) {
+            const GroundModel& g = LightModel(m);
             const auto& indices = g.model->indices;
             for (u32 k = 0; k + 2 < indices.size(); k += 3) {
                 const Vec3& a = g.world[indices[k]];
@@ -6643,8 +6811,8 @@ private:
         float bestGap = 2.5f;
         bool found = false;
         for (const TriangleRef& ref : cell->second) {
-            if (ref.model >= groundModels_.size()) continue;
-            const GroundModel& g = groundModels_[ref.model];
+            if (ref.model >= groundModels_.size() + lightModels_.size()) continue;
+            const GroundModel& g = LightModel(ref.model);
             const auto& indices = g.model->indices;
             const u32 ia = indices[ref.first], ib = indices[ref.first + 1], ic = indices[ref.first + 2];
             const Vec3& a = g.world[ia];
@@ -6684,6 +6852,11 @@ private:
             return;
         }
         sources->sample = [this](const Vec3& p, u32& colour) { return GameLightAt(p, colour); };
+        if (world.IsUnderground1() && RegionAmbient(sources->ambient)) {
+            sources->hasAmbient = true;
+            LOG_INFO("roads: the region's own night ambient %06X where its ground is not under them (%zu ground "
+                     "pieces light the roads)", sources->ambient, lightModels_.size());
+        }
         for (const auto& loaded : world.Loaded())
             for (const nfs::SceneryInstance& instance : loaded->scenery.instances) {
                 const nfs::SolidObject* model = world.FindModel(loaded->scenery.ModelHash(instance));
@@ -7590,6 +7763,7 @@ private:
     terrain::GroundDeform ground_;
     std::vector<GroundModel> groundModels_;
     mutable std::unordered_map<long long, std::vector<TriangleRef>> lightGrid_;
+    std::vector<GroundModel> lightModels_;   // ground that lights the roads but is not sculpted (Underground)
     mutable bool lightGridBuilt_ = false;
     std::vector<roads::GameCut> cutsCache_;
     roads::RoadField groundField_;
@@ -7906,8 +8080,15 @@ void RoadsExtension::FillRoad(PropertiesPanel::View& view, const roads::Segment&
            L"The lane beside the centre line. The game's lane textures carry their marking on the left edge.",
            kLaneCentre, lanes_, true);
     AddRow(view, L"Lanes", L"Other lanes texture", Widen(p.laneInner), L"Every other lane.", kLaneInner, lanes_, true);
+    AddRow(view, L"Lanes", L"Outer lane texture", p.laneOuter.empty() ? L"-" : Widen(p.laneOuter),
+           L"The lane against each edge, when it is not the centre lane; - uses the other lanes' texture.",
+           kLaneOuter, [&] { std::vector<std::wstring> v{ L"-" }; v.insert(v.end(), lanes_.begin(), lanes_.end()); return v; }(), true);
     AddRow(view, L"Lanes", L"Texture length", Number(p.textureLength),
            L"How much road one repeat of a lane texture covers.", kTextureLength);
+    AddRow(view, L"Lanes", L"Line across texture", Number(p.laneLineAt),
+           L"Where the lane texture's line is across it (0 = its left edge, 0.25 = a quarter in): the texture is "
+           L"slid so the line falls on the lane's edge. Underground 2's lanes: 0; Underground's RDP_ROADSTRIP_* "
+           L"and RDP_ROAD_*: 0.25.", kLaneLineAt);
     AddRow(view, L"Lanes", L"Cat's eyes", p.catsEyes ? L"yes" : L"no",
            L"Road studs on the yellow line, wherever it is painted: down the middle, along each edge of a median, "
            L"or the left edge of a one-way road.", kCatsEyes, yesNo);
@@ -7998,6 +8179,9 @@ void RoadsExtension::FillRoad(PropertiesPanel::View& view, const roads::Segment&
            kSidewalkHeight);
     AddRow(view, L"Sidewalks", L"Texture", Widen(p.sidewalkTexture), L"The sidewalk and kerb.", kSidewalkTexture,
            walks_, true);
+    AddRow(view, L"Sidewalks", L"Texture length", Number(p.sidewalkTextureLength),
+           L"How much sidewalk one repeat of its texture covers; 0 uses the lanes' texture length.",
+           kSidewalkTextureLength);
     AddRow(view, L"Walls", L"Left wall", p.wallLeft ? L"yes" : L"no", L"Along the left edge.", kWallLeft, yesNo);
     AddRow(view, L"Walls", L"Right wall", p.wallRight ? L"yes" : L"no", L"Along the right edge.", kWallRight, yesNo);
     AddRow(view, L"Walls", L"Style", kWallStyleNames[std::clamp(p.wallStyle, 0, 3)],
@@ -8013,6 +8197,13 @@ void RoadsExtension::FillRoad(PropertiesPanel::View& view, const roads::Segment&
                kWallModelSpacing);
         AddRow(view, L"Walls", L"Turn", Number(p.wallModelTurn),
                L"Degrees added to each copy, for a model that is not built along X.", kWallModelTurn);
+        AddRow(view, L"Walls", L"Out (+/-)", Number(p.wallModelOut),
+               L"Moves each copy outwards from the road's edge (negative: towards the road).", kWallModelOut);
+        AddRow(view, L"Walls", L"Up (+/-)", Number(p.wallModelUp), L"Raises each copy (negative: lowers it).",
+               kWallModelUp);
+        AddRow(view, L"Walls", L"Along (+/-)", Number(p.wallModelAlong),
+               L"Slides every copy along the road, for a model whose middle is not where it was built.",
+               kWallModelAlong);
     }
     AddRow(view, L"Walls", L"Height", Number(p.wallHeight), L"Above the road or sidewalk.", kWallHeight);
     AddRow(view, L"Walls", L"Start left (+/-)", Number(p.wallStartLeft),
@@ -8032,6 +8223,10 @@ void RoadsExtension::FillRoad(PropertiesPanel::View& view, const roads::Segment&
     AddRow(view, L"Walls", L"Texture", Widen(p.wallTexture), L"The wall.", kWallTexture, walls_, true);
     AddRow(view, L"Walls", L"Texture length", Number(p.wallTextureLength),
            L"How much wall one repeat of its texture covers.", kWallTextureLength);
+    if (p.wallStyle == 0)
+        AddRow(view, L"Walls", L"Texture turn", std::to_wstring(p.wallTextureTurn * 90),
+               L"Turns the wall's texture on it, for a texture drawn lying down (Underground's ARC_BARRIERTYPE1: "
+               L"90).", kWallTextureTurn, { L"0", L"90", L"180", L"270" });
     {
         for (int k = 0; k < 2; ++k) {
             const roads::RoadProfile::SideTerrain& t = p.terrain[k];
@@ -8058,6 +8253,9 @@ void RoadsExtension::FillRoad(PropertiesPanel::View& view, const roads::Segment&
             AddRow(view, group, L"Meet the ground", t.meetGround ? L"yes" : L"no",
                    L"The outer edge comes down or up to the ground there -- the game's, or terrain made here -- so "
                    L"they join without a gap.", f + kSideMeet, yesNo);
+            AddRow(view, group, L"Texture turn", std::to_wstring(t.textureTurn * 90),
+                   L"Turns this side's ground textures (grass, grass-into-rock, rock) on it.", f + kSideTextureTurn,
+                   { L"0", L"90", L"180", L"270" });
             AddRow(view, group, L"Rock on slopes", t.rock ? L"yes" : L"no",
                    L"Steep, high ground turns to the region's rock, through its grass-and-rock texture, the edge "
                    L"broken up at random.", f + kSideRock, yesNo);
@@ -8329,6 +8527,14 @@ void RoadsExtension::ApplyRoad(roads::RoadProfile& p, int only) {
     if (p.Lanes() == 0) p.lanesForward = 1;
     if (readNumber(kLaneWidth, value)) p.laneWidth = std::clamp(value, 1.0f, 20.0f);
     if (readNumber(kTextureLength, value)) p.textureLength = std::clamp(value, 0.5f, 500.0f);
+    if (readText(kLaneOuter, text)) p.laneOuter = text == L"-" ? std::string() : Narrow(text);
+    if (readNumber(kLaneLineAt, value)) p.laneLineAt = std::clamp(value, -1.0f, 1.0f);
+    if (readNumber(kSidewalkTextureLength, value)) p.sidewalkTextureLength = std::clamp(value, 0.0f, 200.0f);
+    if (readText(kWallTextureTurn, text) && !text.empty())
+        p.wallTextureTurn = ((int)(std::wcstol(text.c_str(), nullptr, 10) / 90) % 4 + 4) % 4;
+    if (readNumber(kWallModelOut, value)) p.wallModelOut = std::clamp(value, -20.0f, 20.0f);
+    if (readNumber(kWallModelUp, value)) p.wallModelUp = std::clamp(value, -20.0f, 20.0f);
+    if (readNumber(kWallModelAlong, value)) p.wallModelAlong = std::clamp(value, -100.0f, 100.0f);
     if (readText(kCatsEyes, text)) p.catsEyes = !text.empty() && (text[0] == L'y' || text[0] == L'Y');
     if (readNumber(kCatsEyeSpacing, value)) p.catsEyeSpacing = std::clamp(value, 1.0f, 200.0f);
     if (readText(kCatsEyeModel, text) && !text.empty()) p.catsEyeModel = Narrow(text);
@@ -8355,6 +8561,8 @@ void RoadsExtension::ApplyRoad(roads::RoadProfile& p, int only) {
         }
         if (readNumber(f + kSideRelief, value)) t.relief = std::clamp(value, 0.0f, 50.0f);
         if (readNumber(f + kSideSeed, value)) t.seed = (int)std::lround(value);
+        if (readText(f + kSideTextureTurn, text) && !text.empty())
+            t.textureTurn = ((int)(std::wcstol(text.c_str(), nullptr, 10) / 90) % 4 + 4) % 4;
         if (readText(f + kSideMeet, text)) t.meetGround = !text.empty() && (text[0] == L'y' || text[0] == L'Y');
         if (readText(f + kSideRock, text)) t.rock = !text.empty() && (text[0] == L'y' || text[0] == L'Y');
         if (readNumber(f + kSideRockAngle, value)) t.rockAngle = std::clamp(value, 1.0f, 89.0f);
@@ -9042,7 +9250,7 @@ bool RoadsExtension::BakePoles(const std::vector<roads::Pole>& poles, size_t& ad
     out << "# street lights placed by the last road bake: model hash, x y z\n";
     const auto& loaded = world->Loaded();
     for (const roads::Pole& pole : poles) {
-        const u32 hash = TextureHash(pole.model);    // the game hashes model names the same way
+        const u32 hash = ModelHash(pole.model);
         const nfs::SolidObject* model = world->FindModel(hash);
         if (!model) {
             LOG_WARN("roads: street light model %s is not in the region", pole.model.c_str());
@@ -10017,8 +10225,11 @@ void RoadsExtension::Bake() {
         while (!todo.empty()) {
             auto [piece, depth] = std::move(todo.back());
             todo.pop_back();
+            // ... and one too big for a model's 16-bit indices (a wall of
+            // many copies of a game model) likewise.
             if (piece.VertexCount() == 0 || depth >= 6 ||
-                app_.World()->SectionForPlacementAlong(samples(piece)) != SIZE_MAX) {
+                (piece.VertexCount() <= 30000 &&
+                 app_.World()->SectionForPlacementAlong(samples(piece)) != SIZE_MAX)) {
                 fitted.push_back(std::move(piece));
                 continue;
             }

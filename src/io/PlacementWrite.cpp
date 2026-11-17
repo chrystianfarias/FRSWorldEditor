@@ -6,6 +6,7 @@
 #include "io/SectionEdits.h"
 #include "io/SectionRebuild.h"
 #include <algorithm>
+#include <unordered_set>
 #include "nfs/ChunkReader.h"
 #include "nfs/ForeignModels.h"
 #include "nfs/SceneryEdit.h"
@@ -68,6 +69,53 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
     }
     const auto isForeign = [&](u32 hash) { return std::find(foreign.begin(), foreign.end(), hash) != foreign.end(); };
 
+    // What the editor added and nothing uses any more: a model no instance in
+    // the region places (its last copy deleted), and a texture it added that
+    // no model draws with once those are gone. Deleting the copy left both
+    // behind -- a Sketchfab van deleted at once still sat in M15, and its two
+    // textures (1024 and 512 square) in the resident Y0. Only sections the
+    // editor has written are looked at; each goes out again without them.
+    std::unordered_set<u32> unusedModels, unusedTextures;
+    std::vector<bool> tidy(loaded.size(), false);
+    {
+        std::unordered_set<u32> placed;
+        for (const auto& section : loaded) {
+            for (const nfs::SceneryInstance& instance : section->scenery.instances)
+                placed.insert(section->scenery.ModelHash(instance));
+            for (const auto& placement : section->placements) placed.insert(placement.instance.modelHash);
+        }
+        std::vector<std::pair<size_t, std::vector<SectionEdit>>> written;
+        for (size_t i = 0; i < loaded.size(); ++i) {
+            const nfs::LoadedSection& section = *loaded[i];
+            if (!section.info) continue;
+            const bool hasSpan = std::any_of(existing.begin(), existing.end(), [&](const SpanOverlayInfo& span) {
+                return !span.layoutFile && span.fileOffset == section.info->streamOffset;
+            });
+            if (!hasSpan) continue;
+            std::vector<SectionEdit> edits;
+            std::wstring error;
+            if (!DiffSection(world, *section.info, edits, error)) continue;
+            for (const SectionEdit& e : edits)
+                if (e.kind == SectionEdit::Kind::ModelAdded && !placed.count(e.hash)) unusedModels.insert(e.hash);
+            written.push_back({ i, std::move(edits) });
+        }
+        std::unordered_set<u32> drawn;
+        for (const nfs::SolidObject* model : world.AllModels())
+            if (model && !unusedModels.count(model->hash))
+                drawn.insert(model->textureHashes.begin(), model->textureHashes.end());
+        for (const auto& [i, edits] : written)
+            for (const SectionEdit& e : edits) {
+                if (e.kind == SectionEdit::Kind::ModelAdded && unusedModels.count(e.hash)) tidy[i] = true;
+                if (e.kind == SectionEdit::Kind::TextureAdded && !drawn.count(e.hash)) {
+                    unusedTextures.insert(e.hash);
+                    tidy[i] = true;
+                }
+            }
+        if (!unusedModels.empty() || !unusedTextures.empty())
+            LOG_INFO("placements: %zu models nothing places and %zu textures nothing draws with are taken out",
+                     unusedModels.size(), unusedTextures.size());
+    }
+
     for (size_t index = 0; index < loaded.size(); ++index) {
         const nfs::LoadedSection& section = *loaded[index];
         const bool takesForeign = index == library && !foreign.empty();
@@ -75,7 +123,8 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
         // Need for Speed Underground's collision is not the sections': it is
         // every track's, written apart (io/U1Collision.h).
         const bool collisionHere = section.collisionChanged && !world.IsUnderground1();
-        if (!(section.placementsChanged || collisionHere || takesForeign || takesForeignTextures) || !section.info)
+        if (!(section.placementsChanged || collisionHere || takesForeign || takesForeignTextures || tidy[index]) ||
+            !section.info)
             continue;
         const nfs::Section& entry = *section.info;
         const std::wstring name(entry.name.begin(), entry.name.end());
@@ -102,8 +151,12 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
             continue;
         }
         std::vector<SectionEdit> kept;
-        for (SectionEdit& edit : edits)
-            if (edit.kind != SectionEdit::Kind::Placement) kept.push_back(std::move(edit));
+        for (SectionEdit& edit : edits) {
+            if (edit.kind == SectionEdit::Kind::Placement) continue;
+            if (edit.kind == SectionEdit::Kind::ModelAdded && unusedModels.count(edit.hash)) continue;
+            if (edit.kind == SectionEdit::Kind::TextureAdded && unusedTextures.count(edit.hash)) continue;
+            kept.push_back(std::move(edit));
+        }
 
         // Shipped records removed in the editor: kept in place, matrix zeroed.
         if (!section.removedNatives.empty()) {

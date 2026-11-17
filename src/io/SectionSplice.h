@@ -47,12 +47,17 @@ struct ChunkEdit {
 // inside it that is aligned by file position can be encoded against
 // `sectionFileOffset + start`.
 //
-// `wholeChunks`: the zeros after the last chunk are made a whole number of
-// empty 8-byte chunks. Need for Speed Underground walks a section's chunks
+// `wholeChunks`: the section is made to end on a chunk (EndOnChunk). Need
+// for Speed Underground walks a section's chunks
 // until it lands exactly on the table's size (0x447AC0): four bytes left
 // over are read as a header, the walk runs past the end into whatever
 // follows, and the first id no loader takes stops the game (int3).
 std::vector<u8> SpliceSection(ByteSpan section, std::vector<ChunkEdit> edits, bool wholeChunks = false);
+
+// Makes a walk of `bytes`' top-level chunks land exactly on their end: the
+// tail after the last chunk with an id becomes one zero-id filler chunk
+// (16 bytes longer when fewer than 8 are left).
+void EndOnChunk(std::vector<u8>& bytes);
 
 struct SectionSpanPlan {
     std::vector<SectionSpan>  spans;
