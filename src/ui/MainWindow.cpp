@@ -1457,7 +1457,7 @@ void MainWindow::ShowAbout() {
         window_,
         L"FRS World Editor 0.1.0\n"
         L"A world editor for the Need for Speed games of the Black Box era: it edits Underground 2's "
-        L"worlds and reads Underground's and Most Wanted's.\n\n"
+        L"worlds and reads Underground's models.\n\n"
         L"Created by Chrystian Farias.\n\n"
         L"Licensed under Creative Commons Attribution-NonCommercial 4.0 (CC BY-NC 4.0): you may "
         L"share and adapt it, crediting Chrystian Farias, and not for commercial purposes -- it may "

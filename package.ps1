@@ -24,7 +24,7 @@
 # version pinned below, into third_party\asi-loader.
 
 param(
-    [string]$Version = "0.2.5",
+    [string]$Version = "0.2.7",
     [switch]$WithExtensions,
     [switch]$WithRegions,
     [string]$FastTest = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "FRSFastTest"),

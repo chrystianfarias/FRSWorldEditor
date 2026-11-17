@@ -337,8 +337,8 @@ END
 // ---------------------------------------------------------------------------
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,2,5,0
- PRODUCTVERSION 0,2,5,0
+ FILEVERSION 0,2,7,0
+ PRODUCTVERSION 0,2,7,0
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
 BEGIN
@@ -348,12 +348,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Chrystian Farias"
             VALUE "FileDescription",  "FRS World Editor - a world editor for the Need for Speed games of the Black Box era"
-            VALUE "FileVersion",      "0.2.5"
+            VALUE "FileVersion",      "0.2.7"
             VALUE "InternalName",     "FRSWorldEditor"
             VALUE "LegalCopyright",   "(c) 2026 Chrystian Farias. CC BY-NC 4.0"
             VALUE "OriginalFilename", "FRSWorldEditor.exe"
             VALUE "ProductName",      "FRS World Editor"
-            VALUE "ProductVersion",   "0.2.5"
+            VALUE "ProductVersion",   "0.2.7"
         END
     END
     BLOCK "VarFileInfo"
