@@ -441,6 +441,22 @@ LRESULT MainWindow::Handle(UINT message, WPARAM wParam, LPARAM lParam) {
             StopGame();
             return 0;
 
+        case kOpenWorldArgMessage: {
+            // FRSWorldEditor.exe <world.frsworld>: opened like File > Open World.
+            int count = 0;
+            LPWSTR* arguments = ::CommandLineToArgvW(::GetCommandLineW(), &count);
+            std::wstring path;
+            for (int i = 1; arguments && i < count; ++i) {
+                const std::wstring argument = arguments[i];
+                if (argument.size() > 9 && ::_wcsicmp(argument.c_str() + argument.size() - 9, L".frsworld") == 0)
+                    path = argument;
+            }
+            if (arguments) ::LocalFree(arguments);
+            if (!path.empty() && CanSwitchWorld() && ConfirmUnsavedPlacements() && ConfirmWorldFileSaved())
+                OpenWorldPath(path);
+            return 0;
+        }
+
         case kBakeWriteMessage:
             WriteBake();
             return 0;
@@ -894,6 +910,7 @@ void MainWindow::OnCreate() {
     if (!stored.empty() && DirectoryExists(stored + L"\\TRACKS"))
         SetGameFolder(stored);
     if (StoredSetupVersion() < kSetupVersion) ::PostMessageW(window_, kRunSetupMessage, 0, 0);
+    else ::PostMessageW(window_, kOpenWorldArgMessage, 0, 0);
 }
 
 void MainWindow::OnSize() {
@@ -1596,6 +1613,10 @@ void MainWindow::OpenWorld() {
     dialog.lpstrTitle = L"Open World";
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
     if (!::GetOpenFileNameW(&dialog)) return;
+    OpenWorldPath(path);
+}
+
+void MainWindow::OpenWorldPath(const std::wstring& path) {
     io::WorldFile file;
     std::wstring error;
     if (!file.Load(path, error)) {
