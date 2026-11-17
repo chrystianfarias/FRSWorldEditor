@@ -7,6 +7,7 @@
 #include "io/SectionRebuild.h"
 #include <algorithm>
 #include "nfs/ChunkReader.h"
+#include "nfs/ForeignModels.h"
 #include "nfs/SceneryEdit.h"
 #include "nfs/World.h"
 
@@ -26,9 +27,45 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
     ListSpanOverlays(modelsFolder, world.Region(), existing);
 
     const auto& loaded = world.Loaded();
+
+    // Models from outside the region (nfs/ForeignModels.h) placed anywhere: they
+    // go into the region's library -- its largest section with a texture pack
+    // -- with their textures, where every section sees them. Half the
+    // positioned sections have no texture pack to take a texture in.
+    std::vector<u32> foreign;
+    size_t library = SIZE_MAX;
+    if (!nfs::ForeignSources().empty()) {
+        for (const auto& section : loaded)
+            for (const auto& placement : section->placements) {
+                const u32 hash = placement.instance.modelHash;
+                if (world.ModelHome(hash) < loaded.size() || !world.FindModel(hash)) continue;
+                if (std::find(foreign.begin(), foreign.end(), hash) == foreign.end()) foreign.push_back(hash);
+            }
+        if (!foreign.empty()) {
+            for (size_t i = 0; i < loaded.size(); ++i) {
+                if (!loaded[i]->info || !world.IsLibrary(*loaded[i]) || loaded[i]->texturePacks.empty() ||
+                    loaded[i]->solidLists.empty())
+                    continue;
+                if (library == SIZE_MAX || loaded[i]->info->originalStreamSize > loaded[library]->info->originalStreamSize)
+                    library = i;
+            }
+            if (library == SIZE_MAX) {
+                report << L"The region has no library section with models and textures to take in the models "
+                          L"from outside it. Left alone.\n";
+                plan.ok = false;
+                foreign.clear();
+            } else {
+                LOG_INFO("placements: %zu models from outside the region go to library section %s", foreign.size(),
+                         loaded[library]->info->name.c_str());
+            }
+        }
+    }
+    const auto isForeign = [&](u32 hash) { return std::find(foreign.begin(), foreign.end(), hash) != foreign.end(); };
+
     for (size_t index = 0; index < loaded.size(); ++index) {
         const nfs::LoadedSection& section = *loaded[index];
-        if (!(section.placementsChanged || section.collisionChanged) || !section.info) continue;
+        const bool takesForeign = index == library && !foreign.empty();
+        if (!(section.placementsChanged || section.collisionChanged || takesForeign) || !section.info) continue;
         const nfs::Section& entry = *section.info;
         const std::wstring name(entry.name.begin(), entry.name.end());
 
@@ -141,7 +178,11 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
         // Models to copy in, with the textures the section cannot see.
         size_t copiedModels = 0, copiedTextures = 0;
         bool failed = false;
-        for (const u32 hash : section.importedModels) {
+        std::vector<u32> toCopy;
+        for (const u32 hash : section.importedModels)
+            if (!isForeign(hash)) toCopy.push_back(hash);
+        if (takesForeign) toCopy.insert(toCopy.end(), foreign.begin(), foreign.end());
+        for (const u32 hash : toCopy) {
             const bool present = std::any_of(kept.begin(), kept.end(), [&](const SectionEdit& e) {
                 return e.kind == SectionEdit::Kind::ModelAdded && e.hash == hash;
             });

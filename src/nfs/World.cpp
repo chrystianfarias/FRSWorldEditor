@@ -1,4 +1,6 @@
 #include "nfs/World.h"
+
+#include "nfs/ForeignModels.h"
 #include "nfs/CustomRegions.h"
 
 #include "io/MeshOverlay.h"
@@ -775,7 +777,8 @@ std::vector<const SolidObject*> World::AllModels() const {
 
 const SolidObject* World::FindModel(u32 hash) const {
     const auto it = modelsByHash_.find(hash);
-    return it == modelsByHash_.end() ? nullptr : it->second;
+    if (it != modelsByHash_.end()) return it->second;
+    return foreignLookup_ ? FindForeignModel(hash) : nullptr;
 }
 
 std::vector<const Texture*> World::AllTextures() const {
@@ -802,7 +805,7 @@ const Texture* World::FindTexture(u32 hash) const {
     for (const auto& section : loaded_)
         for (const auto& pack : section->texturePacks)
             if (const Texture* texture = pack->Find(hash)) return texture;
-    return nullptr;
+    return foreignLookup_ ? FindForeignTexture(hash) : nullptr;
 }
 
 const Texture* World::FindDisplayTexture(u32 hash) const {

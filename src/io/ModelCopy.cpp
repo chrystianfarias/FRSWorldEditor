@@ -1,6 +1,8 @@
 #include "io/ModelCopy.h"
 
+#include "core/Log.h"
 #include "nfs/ChunkReader.h"
+#include "nfs/ForeignModels.h"
 #include "nfs/World.h"
 
 #include <algorithm>
@@ -129,7 +131,19 @@ bool AppendSolidObject(ByteSpan pack, u64 packOffset, ByteSpan object, u64 objec
 bool FindModelChunk(const nfs::World& world, u32 hash, ByteSpan& object, u64& fileOffset,
                     u32* packOrder) {
     const size_t home = world.ModelHome(hash);
-    if (home >= world.Loaded().size() || !world.Loaded()[home]->info) return false;
+    if (home >= world.Loaded().size() || !world.Loaded()[home]->info) {
+        // Not the region's: a model from outside it, already in this game's layout.
+        const nfs::ForeignModels* foreign = nfs::ForeignSourceOf(hash);
+        u32 mod128 = 0;
+        std::wstring error;
+        if (!foreign || !foreign->ModelChunk(hash, object, mod128, error)) {
+            if (!error.empty()) LOG_WARN("model %08X from outside the region: %S", hash, error.c_str());
+            return false;
+        }
+        fileOffset = mod128;
+        if (packOrder) *packOrder = 0;
+        return true;
+    }
     const nfs::Section& section = *world.Loaded()[home]->info;
     const ByteSpan bytes = world.SectionBytes(section);
 
@@ -239,6 +253,25 @@ std::vector<NewTexture> TexturesToCopy(const nfs::World& world, u32 hash, size_t
                 if (pack->Find(texture)) visible = true;
         }
         if (visible) continue;
+
+        // A model from outside the region brings its own, converted by its source.
+        const nfs::ForeignModels* foreign = nfs::ForeignSourceOf(hash);
+        if (foreign && world.ModelHome(hash) >= world.Loaded().size()) {
+            bool inRegion = false;
+            for (const auto& section : world.Loaded())
+                for (const auto& pack : section->texturePacks)
+                    if (pack->Find(texture)) inRegion = true;
+            NewTexture copy;
+            if (!inRegion) {
+                if (!foreign->CopyTexture(texture, copy)) {
+                    problem += L"A texture of the model could not be converted. ";
+                    continue;
+                }
+                if (std::none_of(out.begin(), out.end(), [&](const NewTexture& t) { return t.hash == copy.hash; }))
+                    out.push_back(std::move(copy));
+                continue;
+            }
+        }
 
         const nfs::Texture* source = world.FindTexture(texture);
         if (!source) {
