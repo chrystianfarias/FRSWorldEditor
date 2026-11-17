@@ -210,12 +210,29 @@ void RunCollisionSelfTest(nfs::World& world) {
     std::vector<nfs::CollisionPolygon> barrier, wall, ground;
     collision::WallOptions options;
     collision::AppendWall({ { x, y, z }, { x + 20.0f, y, z } }, options, barrier);
-    Check(barrier.size() == 6, "a 20 m barrier makes 3 pieces, both ways");
+    // Both sides: a closed box, never a face and its twin on one line -- the
+    // game's 1 m solid behind the twin would throw a car through the wall.
+    Check(barrier.size() == 8, "a 20 m barrier makes 3 pieces a side and a cap at each end");
+    const auto twinned = [](const std::vector<nfs::CollisionPolygon>& faces) {
+        for (size_t i = 0; i < faces.size(); ++i)
+            for (size_t j = i + 1; j < faces.size(); ++j) {
+                const auto& a = faces[i].corners;
+                const auto& b = faces[j].corners;
+                if (Length(a[0] - b[3]) < 0.05f && Length(a[3] - b[0]) < 0.05f) return true;
+                if (faces[i].barrier && Length(a[0] - b[2]) < 0.05f && Length(a[2] - b[0]) < 0.05f) return true;
+            }
+        return false;
+    };
+    Check(!twinned(barrier), "no barrier has a twin on the same line");
+    Check(barrier.size() == 8 && std::fabs(std::fabs(barrier[0].corners[0].y - barrier[3].corners[0].y) -
+                                           collision::kTwoSidedThickness) < 0.02f,
+          "the two sides of a barrier stand the thickness apart");
     options.kind = collision::WallKind::Vertical;
     options.height = 5.0f;
     collision::AppendWall({ { x, y + 4, z }, { x + 6, y + 4, z }, { x + 6, y + 10, z } }, options, wall);
-    Check(wall.size() == 4 && wall[0].Vertical() && wall[0].corners[1].z - wall[0].corners[0].z > 5.4f,
-          "a vertical wall: one piece a segment, both ways, 5 m above the foot");
+    Check(wall.size() == 6 && wall[0].Vertical() && wall[0].corners[1].z - wall[0].corners[0].z > 5.4f &&
+              !twinned(wall),
+          "a vertical wall: one piece a segment a side, two caps, 5 m above the foot, no twins");
     const std::vector<Vec3> outline = { { x, y - 10, z + 0.3f }, { x + 6, y - 10, z + 0.3f },
                                         { x + 6, y - 4, z + 0.3f }, { x + 3, y - 7, z + 0.3f },
                                         { x, y - 4, z + 0.3f } };
