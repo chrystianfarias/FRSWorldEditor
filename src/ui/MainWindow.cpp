@@ -2,7 +2,9 @@
 
 #include "core/Log.h"
 #include "io/CollisionExport.h"
+#include "io/U1Collision.h"
 #include "io/U1FreeRoam.h"
+#include "nfs/Jdlz.h"
 #include "io/U1TrackBundles.h"
 #include "io/CollisionImport.h"
 #include "ui/CollisionTools.h"
@@ -1478,25 +1480,36 @@ void MainWindow::ShowAbout() {
 // Worlds
 // ---------------------------------------------------------------------------
 
-// Need for Speed Underground regions take moved, deleted and placed objects
-// and edited meshes; their collision is every track's own, in each track's
-// bundle, and is not written yet. True (and says so) when a save of the open
-// region would hold a collision edit -- which is then dropped, the rest kept.
-bool MainWindow::RefuseReadOnlyWorld() {
-    if (!world_ || !world_->IsUnderground1()) return false;
-    bool collision = false;
-    for (const auto& section : world_->Loaded())
-        if (section->collisionChanged) {
-            collision = true;
-            section->collisionChanged = false;
-            section->changedCollisionPacks.clear();
-        }
-    if (!collision) return false;
-    ::MessageBoxW(window_,
-                  L"Collision edits cannot be saved for Need for Speed Underground yet (each race track has its "
-                  L"own collision). They were left out; the other edits are saved.",
-                  kWindowTitle, MB_ICONINFORMATION | MB_OK);
-    return false;
+// Need for Speed Underground's collision is every track's own, in each
+// track's bundle. A save keeps the open track's collision, as the sections
+// now hold it, as an edit of what it shipped with (io/U1Collision.h); every
+// track's bundle takes it as the region opens again (io/U1TrackBundles.h).
+// False (and says why) when it could not be written; `written` when it was.
+bool MainWindow::SaveUnderground1Collision(bool& written) {
+    written = false;
+    if (!world_ || !world_->IsUnderground1()) return true;
+    bool changed = false;
+    for (const auto& section : world_->Loaded()) changed = changed || section->collisionChanged;
+    if (!changed) return true;
+
+    io::U1CollisionEdit edit;
+    std::wstring error;
+    io::DiffU1Collision(world_->ShippedTrackCollision(), world_->CurrentTrackCollision(), edit, error);
+    if (!error.empty() || !io::WriteU1CollisionEdit(io::U1CollisionEditPath(modelsFolder_, world_->Region()), edit)) {
+        ::MessageBoxW(window_,
+                      (L"The collision could not be written: " + (error.empty() ? L"the file was refused" : error) +
+                       L"\n\nNothing of it was changed.").c_str(),
+                      kWindowTitle, MB_ICONWARNING | MB_OK);
+        return false;
+    }
+    for (const auto& section : world_->Loaded()) {
+        section->collisionChanged = false;
+        section->changedCollisionPacks.clear();
+    }
+    written = true;
+    LOG_INFO("collision %S: %zu polygons out, %zu in, against the shipped track %u", world_->Region().c_str(),
+             edit.removed.size(), edit.added.size(), world_->TrackNumber());
+    return true;
 }
 
 void MainWindow::UpdateTitle() {
@@ -2008,10 +2021,17 @@ void MainWindow::LaunchGame() {
     // the region together without the race barriers (io/U1FreeRoam.h).
     if (underground1 && launchTrack_) {
         io::U1FreeRoamReport report;
-        if (io::WriteU1FreeRoamBundle(gameFolder_, launchTrack_, world_->Underground1Tracks(), report))
+        if (io::WriteU1FreeRoamBundle(gameFolder_, world_->Region(), launchTrack_, world_->Underground1Tracks(), report)) {
+            // Named for the FRS World Loader, which serves it in place of the
+            // track's bundle for this launch only (it deletes the note).
+            FILE* note = nullptr;
+            if (::_wfopen_s(&note, (gameFolder_ + L"\\models\\freeroam\\launch.txt").c_str(), L"wt") == 0 && note) {
+                std::fprintf(note, "TRACKB%u.LZC\n", launchTrack_);
+                std::fclose(note);
+            }
             SetStatusText(2, Format(L"Free roam: %zu collision polygons from %zu tracks, %zu race barriers left out",
                                     report.polygons, report.tracks, report.raceBarriers));
-        else
+        } else
             LOG_WARN("launch: no free roam collision (%S): the track's own is used", report.error.c_str());
     }
 
@@ -2928,6 +2948,19 @@ void MainWindow::OpenRegion(std::wstring region) {
         } else if (written) {
             SetStatusText(2, Format(L"%zu track bundles updated with the edited sections", written));
         }
+        // ...and the stream itself, whole, with every edit in it: the game
+        // reads it with overlapped reads no file patching can follow.
+        std::wstring streamError;
+        HCURSOR previous = ::SetCursor(::LoadCursorW(nullptr, IDC_WAIT));
+        if (io::WriteU1Stream(*world_, modelsFolder_, streamError))
+            SetStatusText(2, L"The region's stream was written with the edits in it");
+        ::SetCursor(previous);
+        if (!streamError.empty()) {
+            LOG_WARN("stream: %S", streamError.c_str());
+            ::MessageBoxW(window_, (L"The region's stream could not be written with the edits: " + streamError +
+                                    L".\n\nThe game shows the region without them until it is.").c_str(),
+                          kWindowTitle, MB_ICONWARNING | MB_OK);
+        }
     }
 
     // FRS_U1_EDIT_SELFTEST=1: in a few sections a shipped object moved 5 m and
@@ -3007,11 +3040,69 @@ void MainWindow::OpenRegion(std::wstring region) {
         }
     }
 
+    // FRS_U1_COLLISION_SELFTEST=1: the collision edit without writing anything
+    // -- an untouched track diffs to nothing; three polygons out and one in
+    // diff to exactly that; laid over every track of the region, each loses
+    // what it had of the three and gains the new one, and the rebuilt index
+    // finds the new one where it lies.
+    if (_wgetenv(L"FRS_U1_COLLISION_SELFTEST") && world_ && world_->IsUnderground1()) {
+        io::U1CollisionEdit none, edit;
+        std::wstring error;
+        io::DiffU1Collision(world_->ShippedTrackCollision(), world_->CurrentTrackCollision(), none, error);
+        LOG_INFO("u1 collision self-test: untouched diff %zu out, %zu in %S", none.removed.size(), none.added.size(),
+                 error.c_str());
+        std::vector<nfs::CollisionPolygon> current = world_->CurrentTrackCollision();
+        std::vector<nfs::CollisionPolygon> taken;
+        for (size_t i = 0; i < current.size() && taken.size() < 3; i += current.size() / 3 + 1) taken.push_back(current[i]);
+        for (const auto& p : taken)
+            for (size_t i = 0; i < current.size(); ++i)
+                if (io::KeyOf(current[i]) == io::KeyOf(p)) { current.erase(current.begin() + (ptrdiff_t)i); break; }
+        nfs::CollisionPolygon quad = taken.front();
+        quad.barrier = false;
+        quad.quad = true;
+        const Vec3 at{ 1230.0f, -1670.0f, 15.0f };
+        quad.corners[0] = at;
+        quad.corners[1] = { at.x + 4, at.y, at.z };
+        quad.corners[2] = { at.x + 4, at.y + 4, at.z };
+        quad.corners[3] = { at.x, at.y + 4, at.z };
+        quad.attributes[3] = 0x10;
+        quad.SyncFromAttributes();
+        current.push_back(quad);
+        io::DiffU1Collision(world_->ShippedTrackCollision(), current, edit, error);
+        LOG_INFO("u1 collision self-test: edited diff %zu out, %zu in (expected 3, 1) %S", edit.removed.size(),
+                 edit.added.size(), error.c_str());
+        for (u32 track : world_->Underground1AllTracks()) {
+            std::vector<u8> file;
+            {
+                FILE* in = nullptr;
+                const std::wstring path = gameFolder_ + L"\\TRACKS\\TRACKB" + std::to_wstring(track) + L".LZC";
+                if (::_wfopen_s(&in, path.c_str(), L"rb") != 0 || !in) continue;
+                std::fseek(in, 0, SEEK_END);
+                file.resize((size_t)std::ftell(in));
+                std::fseek(in, 0, SEEK_SET);
+                std::fread(file.data(), 1, file.size(), in);
+                std::fclose(in);
+            }
+            const std::vector<u8> bundle = nfs::JdlzDecompress(ByteSpan{ file.data(), file.size() });
+            const std::vector<io::U1Record> before = io::U1CollisionRecords(bundle);
+            const std::vector<io::U1Record> after = io::ApplyU1CollisionEdit(before, edit);
+            std::vector<u8> rebuilt;
+            std::wstring why;
+            const bool replaced = io::ReplaceU1Collision(bundle, after, rebuilt, why);
+            const std::vector<io::U1Record> back = replaced ? io::U1CollisionRecords(rebuilt) : std::vector<io::U1Record>{};
+            const bool newOneIn = !back.empty() && io::KeyOfRecord(back.back()) == io::KeyOfRecord(edit.added.back());
+            LOG_INFO("u1 collision self-test track %u: %zu polygons -> %zu (%zd taken out), rebuilt %s, read back %zu, "
+                     "new one last: %s %S", track, before.size(), after.size(),
+                     (ptrdiff_t)before.size() + 1 - (ptrdiff_t)after.size(), replaced ? "yes" : "NO", back.size(),
+                     newOneIn ? "yes" : "NO", why.c_str());
+        }
+    }
+
     // FRS_U1_FREEROAM_TEST=<track>: the free roam's track bundle written as
     // a launch would, without launching (checked by tools outside).
     if (const wchar_t* test = _wgetenv(L"FRS_U1_FREEROAM_TEST"); test && world_ && world_->IsUnderground1()) {
         io::U1FreeRoamReport report;
-        const bool ok = io::WriteU1FreeRoamBundle(gameFolder_, (u32)_wtoi(test), world_->Underground1Tracks(), report);
+        const bool ok = io::WriteU1FreeRoamBundle(gameFolder_, world_->Region(), (u32)_wtoi(test), world_->Underground1Tracks(), report);
         LOG_INFO("free roam test: %s %S", ok ? "written" : "FAILED", ok ? report.path.c_str() : report.error.c_str());
     }
 }
@@ -3639,7 +3730,86 @@ void MainWindow::UpdateStatusBar() {
                             stats.frameMilliseconds));
 }
 
+// Need for Speed Underground: the races' track path zones with the collision
+// layer (World::Underground1Zones). The reset zones -- where a race puts the
+// car back, the "invisible walls" -- as red walls 4 m high with the point the
+// car goes to and its facing; the guided-reset areas as thin yellow outlines.
+// Built again when the collision layer is switched or the region changes.
+void MainWindow::UpdateUnderground1ZoneLayer() {
+    WorldRenderer& renderer = viewport_.GetRenderer();
+    const bool show = world_ && world_->IsUnderground1() && renderer.CollisionVisible();
+    if (show == zoneLayerShown_ && world_.get() == zoneLayerWorld_) return;
+    zoneLayerShown_ = show;
+    zoneLayerWorld_ = world_.get();
+    std::vector<WorldRenderer::OverlayVertex> triangles, lines;
+    if (show) {
+        // The zones are flat outlines with no height of their own. Each is drawn
+        // level, at the ground under its reset point -- which lies on the
+        // course -- or, where several floors are stacked there (a bridge over
+        // a street), at the one nearest the typical ground under its corners.
+        const auto heightOf = [&](const nfs::World::Underground1Zone& zone, float& z) {
+            std::vector<float> corners;
+            for (const Vec3& p : zone.ring) {
+                float h = 0.0f;
+                if (nfs::GroundHeight(*world_, p.x, p.y, h)) corners.push_back(h);
+            }
+            std::vector<float> under;
+            nfs::GroundHeights(*world_, zone.resetPoint.x, zone.resetPoint.y, under);
+            if (under.empty()) {
+                const Vec3 c = [&] { Vec3 s{}; for (const Vec3& p : zone.ring) s = s + p; return s * (1.0f / zone.ring.size()); }();
+                nfs::GroundHeights(*world_, c.x, c.y, under);
+            }
+            if (under.empty() && corners.empty()) return false;
+            float typical = 0.0f;
+            if (!corners.empty()) {
+                std::sort(corners.begin(), corners.end());
+                typical = corners[corners.size() / 2];
+            }
+            if (under.empty()) { z = typical; return true; }
+            z = under.front();
+            if (!corners.empty())
+                for (float h : under)
+                    if (std::fabs(h - typical) < std::fabs(z - typical)) z = h;
+            return true;
+        };
+        for (const nfs::World::Underground1Zone& zone : world_->Underground1Zones()) {
+            const bool reset = zone.type == 2 || zone.type == 3;
+            if (!reset) continue;
+            float level = 0.0f;
+            if (!heightOf(zone, level)) continue;
+            const D3DCOLOR edge = D3DCOLOR_ARGB(255, 255, 80, 80);
+            const D3DCOLOR fill = D3DCOLOR_ARGB(70, 255, 60, 60);
+            std::vector<Vec3> ring;
+            for (const Vec3& p : zone.ring) ring.push_back({ p.x, p.y, level + 0.3f });
+            const float top = 4.0f;
+            for (size_t k = 0; k < ring.size(); ++k) {
+                const Vec3& a = ring[k];
+                const Vec3& b = ring[(k + 1) % ring.size()];
+                lines.push_back({ a.x, a.y, a.z, edge });
+                lines.push_back({ b.x, b.y, b.z, edge });
+                lines.push_back({ a.x, a.y, a.z + top, edge });
+                lines.push_back({ b.x, b.y, b.z + top, edge });
+                lines.push_back({ a.x, a.y, a.z, edge });
+                lines.push_back({ a.x, a.y, a.z + top, edge });
+                for (const Vec3& v : { a, b, Vec3{ b.x, b.y, b.z + top }, a, Vec3{ b.x, b.y, b.z + top },
+                                       Vec3{ a.x, a.y, a.z + top } })
+                    triangles.push_back({ v.x, v.y, v.z, fill });
+            }
+            // Where the car is put, and which way it faces.
+            const Vec3& r = zone.resetPoint;
+            const float z = level;
+            const D3DCOLOR mark = D3DCOLOR_ARGB(255, 255, 255, 255);
+            lines.push_back({ r.x, r.y, z, mark });
+            lines.push_back({ r.x, r.y, z + 6.0f, mark });
+            lines.push_back({ r.x, r.y, z + 1.0f, mark });
+            lines.push_back({ r.x + zone.facing.x * 6.0f, r.y + zone.facing.y * 6.0f, z + 1.0f, mark });
+        }
+    }
+    renderer.SetToolOverlay(std::move(triangles), std::move(lines), &zoneLayerShown_);
+}
+
 void MainWindow::Tick(float deltaSeconds) {
+    UpdateUnderground1ZoneLayer();
     // Under the game the map is not seen: no point drawing it.
     // Under the game the map is not seen -- but the panels round it are,
     // and they are drawn by the viewport.
@@ -4209,8 +4379,17 @@ void MainWindow::PasteClipboard() {
 
 bool MainWindow::SavePlacements() {
     if (!world_) return false;
-    if (RefuseReadOnlyWorld()) return false;
+    bool collisionWritten = false;
+    if (!SaveUnderground1Collision(collisionWritten)) return false;
     if (!HasUnsavedPlacements()) {
+        if (collisionWritten) {
+            // Only the collision: the region opens again, and every track's
+            // bundle takes it then.
+            SaveCameraPosition();
+            OpenRegion(world_->Region());
+            SetStatusText(2, L"Collision written into every track of the region");
+            return true;
+        }
         SetStatusText(2, L"No placements to write.");
         return true;
     }

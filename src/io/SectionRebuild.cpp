@@ -258,7 +258,32 @@ bool WriteTexturePack(ChunkWriter& writer, const u8* stream, u64 sectionOffset,
 
         const size_t packAt = writer.Begin(pack.id, 0);
 
-        for (const ChunkSpan& block : blocks) {
+        // The pixel block's own header sits on a 128-byte boundary, as in
+        // every shipped pack: a zero chunk in front of it takes up the slack.
+        // Copying the shipped one as it was leaves the block off the boundary
+        // once the tables before it grew -- harmless where the pixels are read
+        // in place (Underground 2), but Need for Speed Underground copies the
+        // block to a buffer aligned to 128 when it loads the section, and the
+        // pixels, aligned by their place in the file, land off theirs: every
+        // texture of the pack comes out scrambled.
+        const auto padToDataBlock = [&] {
+            const u64 headerAt = writer.base + writer.out.size();
+            const size_t n = (size_t)((128 - (headerAt + 8) % 128) % 128);
+            const size_t at = writer.Begin(0, 0);
+            const std::vector<u8> zeros(n, 0);
+            if (n) writer.Bytes(zeros.data(), n);
+            writer.End(at);
+        };
+        for (size_t b = 0; b < blocks.size(); ++b) {
+            const ChunkSpan& block = blocks[b];
+            const bool beforeData = b + 1 < blocks.size() && blocks[b + 1].id == nfs::kChunkTpkDataBlock;
+            if (block.id == 0 && beforeData) {
+                padToDataBlock();
+                continue;
+            }
+            if (block.id == nfs::kChunkTpkDataBlock && (b == 0 || blocks[b - 1].id != 0) &&
+                (writer.base + writer.out.size()) % 128 != 0)
+                padToDataBlock();
             if (!nfs::IsContainer(block.id)) {
                 writer.Bytes(block.header, block.totalSize);
                 continue;

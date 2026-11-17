@@ -116,6 +116,11 @@ u32 CollisionFingerprint(const CollisionPack& pack);
 // Parses one 0x80034130 chunk.
 bool ParseCollision(const Chunk& collisionChunk, CollisionPack& out);
 
+// One polygon as its 32-byte record, the way EncodeCollision writes each:
+// quantised, barrier ends doubled, the extreme-corner byte computed. False
+// (and why) when it does not fit the file's ranges.
+bool EncodeCollisionPolygon(const CollisionPolygon& polygon, u8* out, std::wstring& error);
+
 // Decodes a run of 32-byte polygon records (0x00034134; Underground 1 keeps
 // the same records for a whole track in its bundle's 0x00034132).
 void ParseCollisionPolygons(ByteSpan polygons, std::vector<CollisionPolygon>& out);

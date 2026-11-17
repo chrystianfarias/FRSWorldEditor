@@ -282,9 +282,12 @@ private:
     static constexpr UINT kShellLibraryActivate = WM_APP + 0x52;
 
     std::wstring LoadStoredGameFolder() const;
-    bool RefuseReadOnlyWorld();
+    bool SaveUnderground1Collision(bool& written);
     void WriteUnderground1LaunchLines(FILE* file, u32 track);
     u32  launchTrack_ = 0;   // Need for Speed Underground: the track the last launch starts
+    void UpdateUnderground1ZoneLayer();
+    bool zoneLayerShown_ = false;
+    const nfs::World* zoneLayerWorld_ = nullptr;
     std::wstring CameraValueName() const;
     void         StoreGameFolder(const std::wstring& folder) const;
     DWORD        StoredSetupVersion() const;

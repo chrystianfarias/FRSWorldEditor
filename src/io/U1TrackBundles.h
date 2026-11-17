@@ -28,6 +28,19 @@ namespace io {
 size_t WriteU1TrackBundles(const nfs::World& world, const std::wstring& gameFolder,
                            const std::wstring& modelsFolder, std::wstring& error);
 
+// Need for Speed Underground streams its track sections with overlapped reads
+// that finish after ReadFile returns, so patching the bytes as they are read
+// (what the FRS World Loader does for Underground 2) cannot reach them, and a
+// read past the end of the file -- where a section that grew was moved -- has
+// nothing to come from. The region's stream is written whole instead, every
+// edit in it: the shipped bytes, each section span (those past the end make
+// the file longer) and each edited mesh's positions, to
+// <models>\files\TRACKS\STREAM<region>.BUN, which the loader opens in place of
+// the game's. Written only when the edits changed since the last time (a
+// signature beside it), taken away when there are none. Returns whether it
+// was written.
+bool WriteU1Stream(const nfs::World& world, const std::wstring& modelsFolder, std::wstring& error);
+
 // The bundle of a track as the game is handed it: <models>\files\TRACKS\
 // TRACKB<n>.LZC when the editor wrote one, else the game's own.
 std::wstring U1TrackBundlePath(const std::wstring& gameFolder, const std::wstring& modelsFolder, u32 track);

@@ -30,11 +30,14 @@ struct U1FreeRoamReport {
     size_t duplicates = 0;      // the same geometry from another track
     size_t raceBarriers = 0;    // left out
     size_t cityWalls = 0;       // kept
+    size_t resetZonesOff = 0;   // the race's reset zones, switched off
     std::wstring path;
     std::wstring error;
 };
 
-bool WriteU1FreeRoamBundle(const std::wstring& gameFolder, u32 track, const std::vector<u32>& regionTracks,
-                           U1FreeRoamReport& report);
+// The editor's own walls (io/U1Collision.h: the polygons a collision edit of
+// `region` added) are never taken for race barriers.
+bool WriteU1FreeRoamBundle(const std::wstring& gameFolder, const std::wstring& region, u32 track,
+                           const std::vector<u32>& regionTracks, U1FreeRoamReport& report);
 
 } // namespace io

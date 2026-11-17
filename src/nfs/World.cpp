@@ -4,6 +4,7 @@
 #include "nfs/CustomRegions.h"
 
 #include "io/MeshOverlay.h"
+#include "io/U1Collision.h"
 #include "nfs/Jdlz.h"
 
 #include "core/Log.h"
@@ -16,6 +17,8 @@
 
 #include <algorithm>
 #include <iterator>
+#include <map>
+#include <set>
 
 namespace nfs {
 
@@ -282,7 +285,9 @@ void World::Close() {
     layoutUnpacked_.shrink_to_fit();
     trackCollision_.clear();
     regionTracks_.clear();
+    zones1_.clear();
     allTracks_.clear();
+    shippedTrackPolygons_.clear();
     game_ = Game::Underground2;
     trackNumber_ = 0;
     stream_.Close();
@@ -514,6 +519,29 @@ const LoadedSection* World::LoadSection(const Section& section) {
     // Written by an older editor with a broken object list: rebuilt from the
     // shipped bytes and its edits at the next save, which lists the objects
     // again the way the game reads them.
+    // A texture pack written with its pixel block off a 128-byte boundary
+    // (SectionRebuild before the fix): Need for Speed Underground scrambles
+    // every texture of the pack. Rebuilt at the next save as well.
+    if (fromSpan) {
+        bool misaligned = false;
+        ChunkReader top(buffer, section.streamOffset);
+        Chunk pack;
+        while (top.Next(pack)) {
+            if (pack.id != kChunkTexturePack) continue;
+            ChunkReader inner = ChunkReader::Children(pack);
+            inner.SetSkipZeroPadding(false);
+            Chunk block;
+            while (inner.Next(block))
+                if (block.id == kChunkTpkDataBlock && block.headerOffset % 128 != 0) misaligned = true;
+        }
+        if (misaligned) {
+            loadedSection->placementsChanged = true;
+            loadedSection->brokenObjectList = true;
+            LOG_WARN("section %s: its texture pack was written with the pixels off their alignment (the textures "
+                     "come out scrambled); it is rebuilt at the next save", section.name.c_str());
+        }
+    }
+
     if (fromSpan && BrokenObjectTable(buffer)) {
         loadedSection->placementsChanged = true;
         loadedSection->brokenObjectList = true;
@@ -950,6 +978,7 @@ bool World::OpenUnderground1(const std::wstring& tracksDirectory, const std::wst
     // The first that fits is opened; every other track that names a part of
     // this region lends its collision (Underground1GroundBelow).
     regionTracks_.clear();
+    zones1_.clear();
     const auto collisionOf = [](u32 number, ByteSpan bundle) {
         TrackCollision track;
         track.track = number;
@@ -979,12 +1008,13 @@ bool World::OpenUnderground1(const std::wstring& tracksDirectory, const std::wst
         u64 fingerprint = 1469598103934665603ull ^ polygons.size;
         for (size_t i = 0; i < polygons.size; i += 7) fingerprint = (fingerprint ^ polygons.data[i]) * 1099511628211ull;
         if (collisionsHeld.insert(fingerprint).second) regionTracks_.push_back(collisionOf(number, bundle));
+        ReadUnderground1Zones(number, bundle);
         if (layoutUnpacked_.empty()) {
             layoutUnpacked_ = std::move(unpacked);
             trackNumber_ = number;
         }
     }
-    LOG_INFO("Underground 1 region %S: %zu tracks", region.c_str(), regionTracks_.size());
+    LOG_INFO("Underground 1 region %S: %zu tracks, %zu track path zones", region.c_str(), regionTracks_.size(), zones1_.size());
     allTracks_ = parts;
     if (trackNumber_ && std::find(allTracks_.begin(), allTracks_.end(), trackNumber_) == allTracks_.end())
         allTracks_.insert(allTracks_.begin(), trackNumber_);
@@ -1036,7 +1066,7 @@ bool World::OpenUnderground1(const std::wstring& tracksDirectory, const std::wst
         if (found != centres.end()) table_.SetPosition(i, found->second);
     }
 
-    SplitTrackCollision();
+    SplitTrackCollision(region);
     OpenGlobalPacks(tracksDirectory);
     raceGroups_.clear();
 
@@ -1045,14 +1075,48 @@ bool World::OpenUnderground1(const std::wstring& tracksDirectory, const std::wst
     return true;
 }
 
-// The track's collision is one list of polygons. The editor keeps collision
-// per section, so each polygon goes to the drivable section whose zone holds
-// its middle, or to the nearest zone's.
-void World::SplitTrackCollision() {
+// Every track has its own collision, along its own course. The editor shows
+// them all together -- the city's collision as every race of the region knows
+// it, each polygon once by what the game reads of it (io/U1Collision.h) --
+// and keeps it per section: each polygon goes to the drivable section whose
+// zone holds its middle, or to the nearest zone's. An edit made on it reaches
+// every track: what is taken out goes from each track that has it, what is
+// added is in all of them (io/U1TrackBundles.h).
+void World::SplitTrackCollision(const std::wstring& region) {
     trackCollision_.clear();
-    const ByteSpan records = TopLevelChunk(LayoutSpan(), kChunkTrackCollisionU1);
-    std::vector<CollisionPolygon> polygons;
-    ParseCollisionPolygons(records, polygons);
+    shippedTrackPolygons_.clear();
+    {
+        std::set<io::U1PolygonKey> seen;
+        const auto take = [&](const std::vector<CollisionPolygon>& list) {
+            for (const CollisionPolygon& polygon : list)
+                if (seen.insert(io::KeyOf(polygon)).second) shippedTrackPolygons_.push_back(polygon);
+        };
+        std::vector<CollisionPolygon> open;
+        ParseCollisionPolygons(TopLevelChunk(LayoutSpan(), kChunkTrackCollisionU1), open);
+        take(open);
+        for (const TrackCollision& track : regionTracks_) take(track.polygons);
+    }
+
+    // The editor's collision edit laid over it (io/U1Collision.h).
+    std::vector<CollisionPolygon> polygons = shippedTrackPolygons_;
+    if (!overlayFolder_.empty()) {
+        io::U1CollisionEdit edit;
+        if (io::ReadU1CollisionEdit(io::U1CollisionEditPath(overlayFolder_, region), edit) && !edit.Empty()) {
+            std::map<io::U1PolygonKey, int> gone;
+            for (const io::U1Record& r : edit.removed) ++gone[io::KeyOfRecord(r)];
+            polygons.clear();
+            for (const CollisionPolygon& polygon : shippedTrackPolygons_) {
+                auto found = gone.find(io::KeyOf(polygon));
+                if (found != gone.end() && found->second > 0) { --found->second; continue; }
+                polygons.push_back(polygon);
+            }
+            for (const io::U1Record& r : edit.added)
+                ParseCollisionPolygons(ByteSpan{ r.data(), r.size() }, polygons);
+            LOG_INFO("Underground 1 collision edit: %zu polygons out, %zu in", edit.removed.size(), edit.added.size());
+        }
+    }
+    LOG_INFO("Underground 1 collision shown: %zu polygons of %zu tracks together", polygons.size(),
+             regionTracks_.size());
     if (polygons.empty()) return;
 
     std::unordered_set<u32> numbers;
@@ -1141,6 +1205,64 @@ bool World::Underground1GroundBelow(float x, float y, float ceiling, float& heig
 std::vector<u32> World::Underground1Tracks() const {
     std::vector<u32> out;
     for (const TrackCollision& track : regionTracks_) out.push_back(track.track);
+    return out;
+}
+
+void World::ReadUnderground1Zones(u32 track, ByteSpan bundle) {
+    constexpr u32 kChunkZones = 0x0003414A;
+    constexpr size_t kZone = 0xB4, kMostPoints = (kZone - 0x3C) / 8;
+    ChunkReader top(bundle, 0);
+    Chunk course;
+    while (top.Next(course)) {
+        if (course.id != 0x80034147u) continue;   // the course: its points, its splines, its zones
+        ChunkReader reader = ChunkReader::Children(course);
+        Chunk chunk;
+        while (reader.Next(chunk)) {
+        if (chunk.id != kChunkZones) continue;
+        for (size_t at = 0; at + kZone <= chunk.data.size; at += kZone) {
+            const ByteSpan record = chunk.data.sub(at, kZone);
+            Underground1Zone zone;
+            zone.type = record.read<u32>(0);
+            zone.resetPoint = { record.read<float>(4), record.read<float>(8), 0.0f };
+            zone.facing = { record.read<float>(0x0C), record.read<float>(0x10), 0.0f };
+            zone.height = record.read<float>(0x14);
+            const u32 points = record.read<u32>(0x38);
+            if (points < 3 || points > kMostPoints) continue;
+            for (u32 k = 0; k < points; ++k)
+                zone.ring.push_back({ record.read<float>(0x3C + k * 8), record.read<float>(0x40 + k * 8), 0.0f });
+            // Each zone once: another track's copy only adds its number.
+            bool known = false;
+            for (Underground1Zone& other : zones1_) {
+                if (other.type != zone.type || other.ring.size() != zone.ring.size()) continue;
+                bool same = true;
+                for (size_t k = 0; k < zone.ring.size() && same; ++k)
+                    same = std::fabs(other.ring[k].x - zone.ring[k].x) < 0.01f &&
+                           std::fabs(other.ring[k].y - zone.ring[k].y) < 0.01f;
+                if (!same) continue;
+                other.tracks.push_back(track);
+                known = true;
+                break;
+            }
+            if (known) continue;
+            zone.tracks.push_back(track);
+            zones1_.push_back(std::move(zone));
+        }
+        }
+    }
+}
+
+std::vector<CollisionPolygon> World::CurrentTrackCollision() const {
+    std::vector<CollisionPolygon> out;
+    std::unordered_set<u32> held;
+    for (const auto& section : loaded_) {
+        if (!section->info) continue;
+        for (const CollisionPack& pack : section->collision) {
+            held.insert(pack.sectionNumber);
+            out.insert(out.end(), pack.polygons.begin(), pack.polygons.end());
+        }
+    }
+    for (const auto& [number, pack] : trackCollision_)
+        if (!held.count(number)) out.insert(out.end(), pack.polygons.begin(), pack.polygons.end());
     return out;
 }
 

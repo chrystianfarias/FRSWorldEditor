@@ -148,6 +148,11 @@ bool GroundHeight(const World& world, float x, float y, float& height) {
     return found;
 }
 
+void GroundHeights(const World& world, float x, float y, std::vector<float>& heights) {
+    heights.clear();
+    HeightsAt(world, x, y, [&](float z) { heights.push_back(z); });
+}
+
 bool GroundBelow(const World& world, float x, float y, float ceiling, float& height) {
     bool found = false;
     HeightsAt(world, x, y, [&](float z) {

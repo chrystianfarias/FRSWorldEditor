@@ -145,6 +145,29 @@ public:
     // Every track the region lists (a STREAM<region>_<n>.BUN part each), and
     // the open one: the bundles a table correction has to reach.
     const std::vector<u32>& Underground1AllTracks() const { return allTracks_; }
+    // Underground 1's track path zones (TRACKB chunk 0x3414A, 0xB4 bytes each:
+    // type +0, the point a reset puts the car on +4, its facing +0x0C, height
+    // +0x14, direction +0x18 (0xFF both), course distance +0x1C, the stretch of
+    // course covered +0x20/+0x24, box +0x28, point count +0x38, outline +0x3C).
+    // Types as the game names them: 2 RESET, 3 RESET_TO_POINT, 4 GUIDED_RESET,
+    // 5 TUNNEL... A RESET zone puts a car that enters it back on the course --
+    // the "invisible walls" of the races. Every track's, each zone once, with
+    // the tracks that have it.
+    struct Underground1Zone {
+        u32 type = 0;
+        std::vector<Vec3> ring;      // z = 0
+        Vec3 resetPoint, facing;
+        float height = 0.0f;
+        std::vector<u32> tracks;
+    };
+    const std::vector<Underground1Zone>& Underground1Zones() const { return zones1_; }
+
+    // The open track's collision as it shipped, before the editor's edit: what
+    // a save compares the sections' collision with (io/U1Collision.h).
+    const std::vector<CollisionPolygon>& ShippedTrackCollision() const { return shippedTrackPolygons_; }
+    // The open track's collision as the editor holds it now: every loaded
+    // section's packs, and the packs of sections it did not load as split.
+    std::vector<CollisionPolygon> CurrentTrackCollision() const;
 
     const std::wstring& Region() const { return region_; }
     const SectionTable& Table()  const { return table_; }
@@ -291,7 +314,8 @@ private:
     bool OpenUnderground1(const std::wstring& tracksDirectory, const std::wstring& region);
     // Underground 1's collision, one pack per drivable section (by zone).
     std::unordered_map<u32, CollisionPack> trackCollision_;
-    void SplitTrackCollision();
+    void SplitTrackCollision(const std::wstring& region);
+    std::vector<CollisionPolygon> shippedTrackPolygons_;   // the open track's own, before any edit
     struct TrackCollision {
         u32 track = 0;
         std::vector<CollisionPolygon> polygons;
@@ -299,6 +323,8 @@ private:
     };
     std::vector<TrackCollision> regionTracks_;   // the open track first
     std::vector<u32> allTracks_;
+    std::vector<Underground1Zone> zones1_;
+    void ReadUnderground1Zones(u32 track, ByteSpan bundle);
     void NameUnderground1Scenery(LoadedSection& section) const;
     FileMap      stream_;   // STREAML4Rx.BUN
     std::vector<std::unique_ptr<FileMap>>     globalFiles_;

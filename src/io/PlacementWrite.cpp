@@ -72,8 +72,10 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
         const nfs::LoadedSection& section = *loaded[index];
         const bool takesForeign = index == library && !foreign.empty();
         const bool takesForeignTextures = index == textureLibrary && !foreign.empty();
-        if (!(section.placementsChanged || section.collisionChanged || takesForeign || takesForeignTextures) ||
-            !section.info)
+        // Need for Speed Underground's collision is not the sections': it is
+        // every track's, written apart (io/U1Collision.h).
+        const bool collisionHere = section.collisionChanged && !world.IsUnderground1();
+        if (!(section.placementsChanged || collisionHere || takesForeign || takesForeignTextures) || !section.info)
             continue;
         const nfs::Section& entry = *section.info;
         const std::wstring name(entry.name.begin(), entry.name.end());
@@ -148,11 +150,11 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
         // An empty region (nfs/CustomRegions.h): a section written goes out
         // with every pack as the editor holds it -- the city's collision is
         // not in it -- not only the ones edited.
-        std::vector<u32> packsToWrite = section.changedCollisionPacks;
-        if (world.EmptyCity())
+        std::vector<u32> packsToWrite = collisionHere ? section.changedCollisionPacks : std::vector<u32>{};
+        if (world.EmptyCity() && !world.IsUnderground1())
             for (u32 p = 0; p < (u32)section.collision.size(); ++p)
                 if (std::find(packsToWrite.begin(), packsToWrite.end(), p) == packsToWrite.end()) packsToWrite.push_back(p);
-        if (section.collisionChanged || (world.EmptyCity() && !packsToWrite.empty())) {
+        if (collisionHere || (world.EmptyCity() && !packsToWrite.empty())) {
             std::vector<u32> orders;
             collision::CollisionChunkOrders(world, entry, orders);
             bool bad = false;

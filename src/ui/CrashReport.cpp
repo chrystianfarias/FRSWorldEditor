@@ -312,12 +312,15 @@ std::wstring BuildReport(const std::wstring& gameFolder, const FILETIME& launche
     b.LowPart = nowFile.dwLowDateTime; b.HighPart = nowFile.dwHighDateTime;
     const double seconds = b.QuadPart > a.QuadPart ? (double)(b.QuadPart - a.QuadPart) / 1e7 : 0.0;
 
+    // Need for Speed Underground's is speed.exe.
+    const bool speed2 = ::GetFileAttributesW((gameFolder + L"\\SPEED2.EXE").c_str()) != INVALID_FILE_ATTRIBUTES;
     wchar_t header[512];
     swprintf_s(header,
                L"FRS World Editor -- game crash report, %04u-%02u-%02u %02u:%02u:%02u\n"
-               L"The game (SPEED2.EXE) ended on its own after %.0f s with exit code %s%s%s.\n"
+               L"The game (%s) ended on its own after %.0f s with exit code %s%s%s.\n"
                L"Game folder: %s\n",
-               now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, seconds, Hex(exitCode).c_str(),
+               now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
+               speed2 ? L"SPEED2.EXE" : L"speed.exe", seconds, Hex(exitCode).c_str(),
                ExitCodeName(exitCode).empty() ? L"" : L" = ", ExitCodeName(exitCode).c_str(), gameFolder.c_str());
     std::wstring report = header;
 

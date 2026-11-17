@@ -41,4 +41,8 @@ bool GroundHeight(const World& world, float x, float y, float& height);
 // `ceiling`: what something dropped from there lands on.
 bool GroundBelow(const World& world, float x, float y, float ceiling, float& height);
 
+// Every walkable collision height at (x, y): a street and the bridge over it
+// are two. Empty where there is no ground.
+void GroundHeights(const World& world, float x, float y, std::vector<float>& heights);
+
 } // namespace nfs

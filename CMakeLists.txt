@@ -20,6 +20,7 @@ add_executable(FRSWorldEditor WIN32
     src/io/CollisionEdit.cpp
     src/io/U1FreeRoam.cpp
     src/io/U1TrackBundles.cpp
+    src/io/U1Collision.cpp
     src/io/CollisionGenerate.cpp
     src/io/MeshOverlay.cpp
     src/io/ModelCopy.cpp

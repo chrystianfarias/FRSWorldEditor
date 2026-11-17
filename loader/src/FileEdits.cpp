@@ -353,6 +353,37 @@ void LoadRedirects(const std::wstring& folder, const std::wstring& relative) {
     ::FindClose(search);
 }
 
+// Need for Speed Underground's free roam (the editor's Launch Game): the
+// editor writes <game>\models\freeroam\TRACKB<n>.LZC -- the track's bundle with
+// every track's collision of the region and no race barriers -- and names it in
+// models\freeroam\launch.txt for that one launch. It is opened in place of
+// TRACKS\TRACKB<n>.LZC, ahead of models\files, and the note is deleted: the
+// next start of the game, from anywhere, races on the track's own bundle.
+// Here rather than in FRSFastTest because only a hook under every plugin sees
+// the game open it (others replace the import table's CreateFile entries).
+void LoadFreeRoamBundle() {
+    const std::wstring folder = GameFolder() + L"\\models\\freeroam";
+    const std::wstring note = folder + L"\\launch.txt";
+    FILE* file = nullptr;
+    if (::_wfopen_s(&file, note.c_str(), L"rt") != 0 || !file) return;
+    char line[64]{};
+    const bool read = std::fgets(line, sizeof(line), file) != nullptr;
+    std::fclose(file);
+    ::DeleteFileW(note.c_str());
+    if (!read) return;
+    std::string name = line;
+    while (!name.empty() && (name.back() == '\n' || name.back() == '\r' || name.back() == ' ')) name.pop_back();
+    if (name.size() < 7 || _strnicmp(name.c_str(), "TRACKB", 6) != 0 || name.find_first_of("\\/:") != std::string::npos)
+        return;
+    const std::wstring wide(name.begin(), name.end());
+    const std::wstring path = folder + L"\\" + wide;
+    if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    std::wstring key = L"TRACKS\\" + wide;
+    for (wchar_t& c : key) c = (wchar_t)::towupper(c);
+    g_redirects.emplace_back(key, path);
+    Log("free roam: TRACKS\\%s is the editor's models\\freeroam\\%s for this launch", name.c_str(), name.c_str());
+}
+
 // Regions the editor made (<game>\models\regions\<R>.frsregion: "region R",
 // "source S") read the files of the region they copy under their own name:
 // TRACKS\<R>.BUN is TRACKS\<S>.BUN, STREAM<R>.BUN is STREAM<S>.BUN and every
@@ -955,6 +986,32 @@ BOOL WINAPI HookedReadFile(HANDLE file, LPVOID buffer, DWORD toRead,
         ~Restore() { ::SetLastError(value); }
     } restore{ error };
 
+    // A read the file cannot answer at all: on a handle opened for overlapped
+    // reads (Need for Speed Underground streams its track this way), a read
+    // that starts past the end fails at once with ERROR_HANDLE_EOF instead of
+    // returning nothing. A section an edit moved past the end of the stream
+    // lives there: its bytes are served, and the read reported done the way
+    // the system does it (the OVERLAPPED's status and count, which
+    // GetOverlappedResult returns as they are, and its event set).
+    if (!ok && overlapped && error == ERROR_HANDLE_EOF && !g_edits.empty()) {
+        Region region;
+        const TrackFile kind = Classify(file, &region);
+        if (kind != TrackFile::Other) {
+            const DWORD supplied = SupplyBeyondFile(readAt, (char*)buffer, toRead, 0,
+                                                    kind == TrackFile::Layout, region);
+            if (supplied > 0) {
+                ::InterlockedIncrement(&g_streamReads);
+                overlapped->Internal = 0;   // STATUS_SUCCESS
+                overlapped->InternalHigh = supplied;
+                if (overlapped->hEvent) ::SetEvent(overlapped->hEvent);
+                if (readOut) *readOut = supplied;
+                if (kind == TrackFile::Stream) Note(readAt, toRead, 0, supplied);
+                restore.value = ERROR_SUCCESS;
+                return TRUE;
+            }
+        }
+    }
+
     if (!ok || g_edits.empty() || !knowOffset) return ok;
 
     DWORD got = readOut ? *readOut : 0;
@@ -1329,6 +1386,7 @@ void StartFileEdits() {
     // import walk over every module stays on the thread -- and nothing here
     // waits on anything.
     ::InitializeCriticalSection(&g_lock);
+    LoadFreeRoamBundle();   // first: it wins over models\files
     LoadRedirects(GameFolder() + L"\\models\\files", L"");
     LoadRegionAliases();
     // Patched whether or not anything is replaced. The region's table file is

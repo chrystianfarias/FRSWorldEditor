@@ -1,6 +1,8 @@
 #include "io/U1TrackBundles.h"
 
 #include "core/Log.h"
+#include "io/MeshOverlay.h"
+#include "io/U1Collision.h"
 #include "nfs/Jdlz.h"
 #include "nfs/World.h"
 
@@ -61,6 +63,109 @@ struct Entry { u32 offset, size, geometry, sum; };
 
 } // namespace
 
+bool WriteU1Stream(const nfs::World& world, const std::wstring& modelsFolder, std::wstring& error) {
+    if (!world.IsUnderground1() || modelsFolder.empty()) return false;
+    const std::wstring region = world.Region();
+    const std::string region8(region.begin(), region.end());
+
+    // The edits: the stream's spans, as the editor read them, and the meshes.
+    struct Mesh { u64 offset; u32 stride; std::vector<float> positions; };
+    std::vector<Mesh> meshes;
+    WIN32_FIND_DATAW found{};
+    HANDLE search = ::FindFirstFileW((modelsFolder + L"\\*.frsmesh").c_str(), &found);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            std::vector<u8> file;
+            if (!ReadWhole(modelsFolder + L"\\" + found.cFileName, file) || file.size() < sizeof(MeshOverlayHeader)) continue;
+            MeshOverlayHeader header;
+            std::memcpy(&header, file.data(), sizeof(header));
+            if (std::memcmp(header.magic, "FRSMESH1", 8) != 0) continue;
+            if (std::string(header.region, strnlen(header.region, 8)) != region8) continue;
+            const size_t floats = (size_t)header.vertexCount * 3;
+            if (file.size() < sizeof(header) + floats * 4 || header.stride < 12) continue;
+            Mesh mesh{ header.fileOffset, header.stride, std::vector<float>(floats) };
+            std::memcpy(mesh.positions.data(), file.data() + sizeof(header), floats * 4);
+            meshes.push_back(std::move(mesh));
+        } while (::FindNextFileW(search, &found));
+        ::FindClose(search);
+    }
+    std::vector<const SpanOverlay*> spans;
+    for (const SpanOverlay& span : world.Spans())
+        if (!span.layoutFile) spans.push_back(&span);
+
+    const std::wstring folder = modelsFolder + L"\\files\\TRACKS";
+    const std::wstring path = folder + L"\\STREAM" + region + L".BUN";
+    const std::wstring signaturePath = folder + L"\\FRS-" + region + L"-stream.txt";
+    if (spans.empty() && meshes.empty()) {
+        if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            ::DeleteFileW(path.c_str());
+            LOG_INFO("stream %S: no edits, the game's own is read again", region.c_str());
+        }
+        ::DeleteFileW(signaturePath.c_str());
+        return false;
+    }
+
+    // The signature: what the copy holds.
+    u64 hash = 1469598103934665603ull;
+    const auto mix = [&](const void* data, size_t size) {
+        const u8* p = (const u8*)data;
+        for (size_t i = 0; i < size; ++i) hash = (hash ^ p[i]) * 1099511628211ull;
+    };
+    const ByteSpan stream = world.StreamBytes();
+    mix(&stream.size, sizeof(stream.size));
+    for (const SpanOverlay* span : spans) {
+        mix(&span->fileOffset, sizeof(span->fileOffset));
+        mix(span->bytes.data(), span->bytes.size());
+    }
+    for (const Mesh& mesh : meshes) {
+        mix(&mesh.offset, sizeof(mesh.offset));
+        mix(mesh.positions.data(), mesh.positions.size() * 4);
+    }
+    char signature[64];
+    std::snprintf(signature, sizeof(signature), "%016llX %zu spans %zu meshes\n", (unsigned long long)hash,
+                  spans.size(), meshes.size());
+    std::vector<u8> before;
+    if (ReadWhole(signaturePath, before) && std::string(before.begin(), before.end()) == signature &&
+        ::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return false;
+
+    ::CreateDirectoryW(modelsFolder.c_str(), nullptr);
+    ::CreateDirectoryW((modelsFolder + L"\\files").c_str(), nullptr);
+    ::CreateDirectoryW(folder.c_str(), nullptr);
+    HANDLE out = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (out == INVALID_HANDLE_VALUE) {
+        error = L"could not write " + path + L" (is the game running?)";
+        return false;
+    }
+    const auto writeAt = [&](u64 at, const void* data, size_t size) {
+        LARGE_INTEGER where;
+        where.QuadPart = (LONGLONG)at;
+        DWORD written = 0;
+        return ::SetFilePointerEx(out, where, nullptr, FILE_BEGIN) &&
+               ::WriteFile(out, data, (DWORD)size, &written, nullptr) && written == size;
+    };
+    bool ok = true;
+    for (u64 at = 0; ok && at < stream.size; at += 16u << 20) {
+        const size_t piece = (size_t)std::min<u64>(16u << 20, stream.size - at);
+        ok = writeAt(at, stream.data + at, piece);
+    }
+    for (const SpanOverlay* span : spans)
+        ok = ok && writeAt(span->fileOffset, span->bytes.data(), span->bytes.size());
+    for (const Mesh& mesh : meshes)
+        for (size_t v = 0; ok && v < mesh.positions.size() / 3; ++v)
+            ok = writeAt(mesh.offset + v * (u64)mesh.stride, &mesh.positions[v * 3], 12);
+    ::CloseHandle(out);
+    if (!ok) {
+        ::DeleteFileW(path.c_str());
+        error = L"could not write " + path;
+        return false;
+    }
+    WriteWhole(signaturePath, std::vector<u8>(signature, signature + std::strlen(signature)));
+    LOG_INFO("stream %S written whole to %S: %zu section spans, %zu meshes", region.c_str(), path.c_str(), spans.size(),
+             meshes.size());
+    return true;
+}
+
 std::wstring U1TrackBundlePath(const std::wstring& gameFolder, const std::wstring& modelsFolder, u32 track) {
     const std::wstring name = L"TRACKB" + std::to_wstring(track) + L".LZC";
     const std::wstring mine = modelsFolder + L"\\files\\TRACKS\\" + name;
@@ -98,11 +203,23 @@ size_t WriteU1TrackBundles(const nfs::World& world, const std::wstring& gameFold
             signature += line;
         }
     }
+    // The collision edit (io/U1Collision.h), in every track's bundle too.
+    U1CollisionEdit collision;
+    std::vector<u8> collisionFile;
+    const std::wstring collisionPath = U1CollisionEditPath(modelsFolder, world.Region());
+    if (ReadU1CollisionEdit(collisionPath, collision) && !collision.Empty() && ReadWhole(collisionPath, collisionFile)) {
+        u32 hash = 2166136261u;
+        for (u8 b : collisionFile) hash = (hash ^ b) * 16777619u;
+        char line[64];
+        std::snprintf(line, sizeof(line), "collision %zu out %zu in %08X\n", collision.removed.size(),
+                      collision.added.size(), hash);
+        signature += line;
+    }
     std::vector<u8> before;
     if (ReadWhole(signaturePath, before) && std::string(before.begin(), before.end()) == signature) return 0;
 
     const std::vector<u32> tracks = world.Underground1AllTracks();
-    if (moved.empty()) {
+    if (moved.empty() && collision.Empty()) {
         // Every section where it shipped: the game's own bundles again.
         for (u32 track : tracks)
             ::DeleteFileW((folder + L"\\TRACKB" + std::to_wstring(track) + L".LZC").c_str());
@@ -143,6 +260,19 @@ size_t WriteU1TrackBundles(const nfs::World& world, const std::wstring& gameFold
         const u32 streamSize = (u32)streamEnd;
         std::memcpy(sizes + 4, &streamSize, 4);
 
+        size_t polygons = 0;
+        if (!collision.Empty()) {
+            const std::vector<U1Record> records = ApplyU1CollisionEdit(U1CollisionRecords(bundle), collision);
+            std::vector<u8> replaced;
+            std::wstring why;
+            if (!ReplaceU1Collision(bundle, records, replaced, why)) {
+                error = L"TRACKB" + std::to_wstring(track) + L".LZC: " + why;
+                return written;
+            }
+            bundle = std::move(replaced);
+            polygons = records.size();
+        }
+
         const std::vector<u8> packed = nfs::JdlzCompress(ByteSpan{ bundle.data(), bundle.size() });
         if (packed.size() >= bundle.size() || nfs::JdlzDecompress(ByteSpan{ packed.data(), packed.size() }) != bundle) {
             error = L"TRACKB" + std::to_wstring(track) + L".LZC did not compress to something the game can unpack";
@@ -153,7 +283,8 @@ size_t WriteU1TrackBundles(const nfs::World& world, const std::wstring& gameFold
             return written;
         }
         ++written;
-        LOG_INFO("track bundle %u: %zu sections moved or resized, stream %u bytes", track, changed, streamSize);
+        LOG_INFO("track bundle %u: %zu sections moved or resized, stream %u bytes, %zu collision polygons%s", track,
+                 changed, streamSize, polygons, collision.Empty() ? " (shipped)" : "");
     }
     WriteWhole(signaturePath, std::vector<u8>(signature.begin(), signature.end()));
     LOG_INFO("track bundles %S: %zu written to %S", world.Region().c_str(), written, folder.c_str());

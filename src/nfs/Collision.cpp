@@ -720,6 +720,74 @@ bool EncodeChecked(const CollisionPack& pack, bool authored, std::vector<u8>& ch
 
 } // namespace
 
+bool EncodeCollisionPolygon(const CollisionPolygon& polygon, u8* out, std::wstring& error) {
+    std::memset(out, 0, kPolygonSize);
+    std::memcpy(out, polygon.attributes, 4);
+    const auto put16 = [&](size_t at, u16 v) { std::memcpy(out + at, &v, 2); };
+    put16(6, 0xFFFF);
+
+    // A barrier is stored as its two ends, each written twice.
+    Vec3 corners[4];
+    for (int c = 0; c < 4; ++c) corners[c] = polygon.corners[c];
+    if (polygon.barrier) {
+        corners[1] = corners[0];
+        corners[3] = corners[2];
+    }
+
+    i16 base = 0;
+    if (!polygon.barrier) {
+        // The whole-unit base is the floor of the middle of the polygon's
+        // height range, which keeps the per-corner offsets centred on it.
+        const float lowest  = std::min({ corners[0].z, corners[1].z, corners[2].z, corners[3].z });
+        const float highest = std::max({ corners[0].z, corners[1].z, corners[2].z, corners[3].z });
+        const long floorBase = (long)std::floor((lowest + highest) * 0.5f);
+        if (floorBase < -32767 || floorBase > 32767) {
+            error = L"A collision polygon lies outside the height the file can store.";
+            return false;
+        }
+        base = (i16)floorBase;
+    }
+    put16(kPolygonHeightBase, (u16)base);
+
+    i16 planX[4] = {}, planY[4] = {};
+    for (int c = 0; c < 4; ++c) {
+        i16 x = 0, y = 0, z = 0;
+        if (!Quantise(corners[c].x, 8.0f, x) || !Quantise(corners[c].y, 8.0f, y)) {
+            error = L"A collision polygon lies outside the plan range of the file (+/-4096).";
+            return false;
+        }
+        if (polygon.barrier) {
+            z = (c == 0 || c == 3) ? -kBarrierHeight : kBarrierHeight;
+        } else if (!Quantise(corners[c].z - (float)base, 256.0f, z)) {
+            error = L"A collision polygon is more than 127 units tall; split it.";
+            return false;
+        }
+        put16(kPolygonX + (size_t)c * 2, (u16)x);
+        put16(kPolygonY + (size_t)c * 2, (u16)y);
+        put16(kPolygonZ + (size_t)c * 2, (u16)z);
+        planX[c] = x;
+        planY[c] = y;
+    }
+
+    // Byte 1 is not a surface: it names, two bits each, the corner lying
+    // furthest toward -x, -y, +x and +y (bits 0-1, 2-3, 4-5, 6-7), a tie
+    // going to the later corner. That is a precomputed box the game tests
+    // a car against before the polygon itself, and it holds for every one
+    // of the 432 000 shipped polygons of the eight regions, barriers
+    // included. Copied from another polygon it describes the wrong box:
+    // cars fall through ground and pass through walls wherever the two
+    // disagree. So it is computed, never copied.
+    const auto extreme = [](const i16 values[4], bool greatest) {
+        int best = 0;
+        for (int c = 1; c < 4; ++c)
+            if (greatest ? values[c] >= values[best] : values[c] <= values[best]) best = c;
+        return best;
+    };
+    out[kPolygonCornerCode] = (u8)(extreme(planX, false) | extreme(planY, false) << 2 |
+                                   extreme(planX, true) << 4 | extreme(planY, true) << 6);
+    return true;
+}
+
 bool EncodeCollision(const CollisionPack& pack, std::vector<u8>& chunk, std::wstring& error) {
     // A pack read from the file and untouched is written exactly as it was.
     // Any other -- edited here, or made from nothing -- is brought to the rules
@@ -766,53 +834,16 @@ bool EncodeChecked(const CollisionPack& pack, bool authored, std::vector<u8>& ch
     for (size_t i = 0; i < count; ++i) {
         const CollisionPolygon& polygon = pack.polygons[i];
         const size_t at = i * kPolygonSize;
-        std::memcpy(records.data() + at, polygon.attributes, 4);
-        Put16(records, at + 6, 0xFFFF);
+        if (!EncodeCollisionPolygon(polygon, records.data() + at, error)) return false;
 
-        // A barrier is stored as its two ends, each written twice.
-        Vec3 corners[4];
-        for (int c = 0; c < 4; ++c) corners[c] = polygon.corners[c];
-        if (polygon.barrier) {
-            corners[1] = corners[0];
-            corners[3] = corners[2];
-        }
-
-        i16 base = 0;
-        if (!polygon.barrier) {
-            // The whole-unit base is the floor of the middle of the polygon's
-            // height range, which keeps the per-corner offsets centred on it.
-            const float lowest  = std::min({ corners[0].z, corners[1].z, corners[2].z, corners[3].z });
-            const float highest = std::max({ corners[0].z, corners[1].z, corners[2].z, corners[3].z });
-            const long floorBase = (long)std::floor((lowest + highest) * 0.5f);
-            if (floorBase < -32767 || floorBase > 32767) {
-                error = L"A collision polygon lies outside the height the file can store.";
-                return false;
-            }
-            base = (i16)floorBase;
-        }
-        Put16(records, at + kPolygonHeightBase, (u16)base);
-
-        i16 planX[4] = {}, planY[4] = {};
+        // Measured from the stored values, so the header and the grid
+        // describe exactly what the game will read.
+        const ByteSpan record{ records.data() + at, kPolygonSize };
+        const i16 base = record.read<i16>(kPolygonHeightBase);
         for (int c = 0; c < 4; ++c) {
-            i16 x = 0, y = 0, z = 0;
-            if (!Quantise(corners[c].x, 8.0f, x) || !Quantise(corners[c].y, 8.0f, y)) {
-                error = L"A collision polygon lies outside the plan range of the file (+/-4096).";
-                return false;
-            }
-            if (polygon.barrier) {
-                z = (c == 0 || c == 3) ? -kBarrierHeight : kBarrierHeight;
-            } else if (!Quantise(corners[c].z - (float)base, 256.0f, z)) {
-                error = L"A collision polygon is more than 127 units tall; split it.";
-                return false;
-            }
-            Put16(records, at + kPolygonX + (size_t)c * 2, (u16)x);
-            Put16(records, at + kPolygonY + (size_t)c * 2, (u16)y);
-            Put16(records, at + kPolygonZ + (size_t)c * 2, (u16)z);
-            planX[c] = x;
-            planY[c] = y;
-
-            // Measured from the stored values, so the header and the grid
-            // describe exactly what the game will read.
+            const i16 x = record.read<i16>(kPolygonX + (size_t)c * 2);
+            const i16 y = record.read<i16>(kPolygonY + (size_t)c * 2);
+            const i16 z = record.read<i16>(kPolygonZ + (size_t)c * 2);
             const float px = x * kPlanScale, py = y * kPlanScale;
             const float pz = polygon.barrier ? z * kHeightScale : base + z * kHeightScale;
             bounds.Add(Vec3{ px, py, pz });
@@ -823,24 +854,6 @@ bool EncodeChecked(const CollisionPack& pack, bool authored, std::vector<u8>& ch
                              [&](const Point2& p) { return p.x == point.x && p.y == point.y; }))
                 outline.push_back(point);
         }
-
-        // Byte 1 is not a surface: it names, two bits each, the corner lying
-        // furthest toward -x, -y, +x and +y (bits 0-1, 2-3, 4-5, 6-7), a tie
-        // going to the later corner. That is a precomputed box the game tests
-        // a car against before the polygon itself, and it holds for every one
-        // of the 432 000 shipped polygons of the eight regions, barriers
-        // included. Copied from another polygon it describes the wrong box:
-        // cars fall through ground and pass through walls wherever the two
-        // disagree. So it is computed, never copied.
-        const auto extreme = [](const i16 values[4], bool greatest) {
-            int best = 0;
-            for (int c = 1; c < 4; ++c)
-                if (greatest ? values[c] >= values[best] : values[c] <= values[best]) best = c;
-            return best;
-        };
-        records[at + kPolygonCornerCode] =
-            (u8)(extreme(planX, false) | extreme(planY, false) << 2 |
-                 extreme(planX, true) << 4 | extreme(planY, true) << 6);
     }
 
     // --- grid ----------------------------------------------------------------

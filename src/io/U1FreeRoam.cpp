@@ -1,6 +1,7 @@
 #include "io/U1FreeRoam.h"
 
 #include "core/Log.h"
+#include "io/U1Collision.h"
 #include "io/U1TrackBundles.h"
 #include "nfs/Jdlz.h"
 
@@ -25,9 +26,6 @@ constexpr u32 kChunkQuadtree = 0x34130, kChunkCells = 0x34131, kChunkPolygons = 
               kChunkIndices = 0x34133, kChunkBounds = 0x34134;
 constexpr u8 kFlagQuad = 0x10, kFlagVertical = 0x02, kFlagWall = 0x04;
 constexpr float kCell = 32.0f;            // a cell of the grid the quadtree ends in
-constexpr float kProbe = 3.0f;            // how far off a wall its two sides are looked at
-constexpr float kSameGround = 2.5f;       // the two sides' ground at one level
-constexpr float kGroundGrid = 8.0f;       // the lookup grid of the ground polygons
 
 bool ReadWholeFile(const std::wstring& path, std::vector<u8>& out) {
     FILE* file = nullptr;
@@ -111,25 +109,27 @@ GeometryKey KeyOf(const Decoded& d) {
     return { flat, (u8)(d.flags & (kFlagVertical | kFlagWall)) };
 }
 
+// The ground polygons of one track, found by plan position.
 struct GroundIndex {
+    static constexpr float kGrid = 8.0f;
     std::unordered_map<u64, std::vector<const Decoded*>> cells;
     static u64 Key(int gx, int gy) { return ((u64)(u32)gx << 32) | (u32)gy; }
 
     void Add(const Decoded& d) {
         const float x0 = *std::min_element(d.x, d.x + 4), x1 = *std::max_element(d.x, d.x + 4);
         const float y0 = *std::min_element(d.y, d.y + 4), y1 = *std::max_element(d.y, d.y + 4);
-        for (int gx = (int)std::floor(x0 / kGroundGrid); gx <= (int)std::floor(x1 / kGroundGrid); ++gx)
-            for (int gy = (int)std::floor(y0 / kGroundGrid); gy <= (int)std::floor(y1 / kGroundGrid); ++gy)
+        for (int gx = (int)std::floor(x0 / kGrid); gx <= (int)std::floor(x1 / kGrid); ++gx)
+            for (int gy = (int)std::floor(y0 / kGrid); gy <= (int)std::floor(y1 / kGrid); ++gy)
                 cells[Key(gx, gy)].push_back(&d);
     }
 
+    // The heights of the ground polygons over (x, y).
     void HeightsAt(float x, float y, std::vector<float>& out) const {
         out.clear();
-        const auto found = cells.find(Key((int)std::floor(x / kGroundGrid), (int)std::floor(y / kGroundGrid)));
+        const auto found = cells.find(Key((int)std::floor(x / kGrid), (int)std::floor(y / kGrid)));
         if (found == cells.end()) return;
         for (const Decoded* d : found->second) {
-            const int halves = d->Quad() ? 2 : 1;
-            for (int h = 0; h < halves; ++h) {
+            for (int h = 0; h < (d->Quad() ? 2 : 1); ++h) {
                 const int a = 0, b = h ? 2 : 1, c = h ? 3 : 2;
                 const float den = (d->y[b] - d->y[c]) * (d->x[a] - d->x[c]) + (d->x[c] - d->x[b]) * (d->y[a] - d->y[c]);
                 if (std::fabs(den) < 1e-9f) continue;
@@ -143,23 +143,33 @@ struct GroundIndex {
     }
 };
 
-bool RaceBarrier(const Decoded& wall, const GroundIndex& ground) {
-    const float ax = wall.x[0], ay = wall.y[0], bx = wall.x[2], by = wall.y[2];
+// A barrier that closes a street for a race: another track has level ground
+// on both sides of it and not the barrier -- that track's cars drive through
+// where it stands. A building's barrier has no ground behind it.
+bool DrivenThroughElsewhere(const Decoded& barrier, const GeometryKey& key, const std::vector<GroundIndex>& ground,
+                            const std::vector<std::set<GeometryKey>>& barriers) {
+    const float ax = barrier.x[0], ay = barrier.y[0], bx = barrier.x[2], by = barrier.y[2];
     const float length = std::hypot(bx - ax, by - ay);
-    if (length < 0.05f) return false;
+    if (length < 0.5f) return false;
     const float nx = -(by - ay) / length, ny = (bx - ax) / length;
+    constexpr float kProbe = 3.0f, kLevel = 1.5f;
     std::vector<float> one, other;
-    for (float t : { 0.25f, 0.5f, 0.75f }) {
-        const float mx = ax + (bx - ax) * t, my = ay + (by - ay) * t;
-        ground.HeightsAt(mx + nx * kProbe, my + ny * kProbe, one);
-        ground.HeightsAt(mx - nx * kProbe, my - ny * kProbe, other);
-        bool level = false;
-        for (float p : one)
-            for (float q : other)
-                if (std::fabs(p - q) < kSameGround) level = true;
-        if (!level) return false;
+    for (size_t t = 0; t < ground.size(); ++t) {
+        if (barriers[t].count(key)) continue;
+        int open = 0;
+        for (float s : { 0.25f, 0.5f, 0.75f }) {
+            const float mx = ax + (bx - ax) * s, my = ay + (by - ay) * s;
+            ground[t].HeightsAt(mx + nx * kProbe, my + ny * kProbe, one);
+            ground[t].HeightsAt(mx - nx * kProbe, my - ny * kProbe, other);
+            bool level = false;
+            for (float a : one)
+                for (float b : other)
+                    if (std::fabs(a - b) < kLevel) level = true;
+            open += level;
+        }
+        if (open >= 2) return true;
     }
-    return true;
+    return false;
 }
 
 // A chunk writer that knows where it is: the game's loaders find aligned
@@ -191,16 +201,47 @@ template <typename T> void Put(std::vector<u8>& out, T value) {
 
 } // namespace
 
-bool WriteU1FreeRoamBundle(const std::wstring& gameFolder, u32 track, const std::vector<u32>& regionTracks,
-                           U1FreeRoamReport& report) {
+bool WriteU1FreeRoamBundle(const std::wstring& gameFolder, const std::wstring& region, u32 track,
+                           const std::vector<u32>& regionTracks, U1FreeRoamReport& report) {
     report = {};
+    (void)region;
     const std::wstring tracks = gameFolder + L"\\TRACKS\\";
     // The track's bundle as the game is handed it: with the editor's table
     // corrections when there are any (io/U1TrackBundles.h).
-    const std::vector<u8> base = Unpacked(U1TrackBundlePath(gameFolder, gameFolder + L"\\models", track));
+    std::vector<u8> base = Unpacked(U1TrackBundlePath(gameFolder, gameFolder + L"\\models", track));
     if (base.empty()) {
         report.error = L"the track's TRACKB could not be read";
         return false;
+    }
+
+    // The race's reset zones (0x3414A, 0xB4 bytes each, type at +0: 2 RESET,
+    // 3 RESET_TO_POINT) put a car that enters them back on the course -- the
+    // race's invisible walls. In a drive they are type 0 (no wrong way), each
+    // record where it is, so nothing that counts them moves.
+    // They sit in the course's container, 0x80034147.
+    for (const TopChunk& course : TopChunks(base)) {
+        if (course.id != 0x80034147u) continue;
+        for (size_t child = course.offset + 8; child + 8 <= course.offset + 8 + course.size;) {
+            u32 id = 0, length = 0;
+            std::memcpy(&id, base.data() + child, 4);
+            std::memcpy(&length, base.data() + child + 4, 4);
+            const size_t next = child + 8 + length;
+            if (next > course.offset + 8 + course.size) break;
+            if (id != 0x0003414Au) { child = next; continue; }
+            size_t skip = 0;
+            while (skip + 4 <= length && std::memcmp(base.data() + child + 8 + skip, "\x11\x11\x11\x11", 4) == 0) skip += 4;
+            u8* records = base.data() + child + 8 + skip;
+            const size_t size = length - skip;
+            for (size_t at = 0; at + 0xB4 <= size; at += 0xB4) {
+                u32 type = 0;
+                std::memcpy(&type, records + at, 4);
+                if (type != 2 && type != 3) continue;
+                const u32 none = 0;
+                std::memcpy(records + at, &none, 4);
+                ++report.resetZonesOff;
+            }
+            child = next;
+        }
     }
 
     // Every track's polygons, each geometry once.
@@ -208,11 +249,18 @@ bool WriteU1FreeRoamBundle(const std::wstring& gameFolder, u32 track, const std:
     std::set<GeometryKey> seen;
     std::vector<u32> sources = regionTracks;
     if (std::find(sources.begin(), sources.end(), track) == sources.end()) sources.insert(sources.begin(), track);
+    // Each track's own ground and barriers, to tell a race's barriers (above).
+    std::vector<std::vector<Decoded>> trackGround;
+    std::vector<std::set<GeometryKey>> trackBarriers;
+    trackGround.reserve(sources.size());
     for (u32 number : sources) {
+        // As the game is handed it: with the editor's collision edit.
         const std::vector<u8> bundle =
-            number == track ? base : Unpacked(tracks + L"TRACKB" + std::to_wstring(number) + L".LZC");
+            number == track ? base : Unpacked(U1TrackBundlePath(gameFolder, gameFolder + L"\\models", number));
         if (bundle.empty()) continue;
         ++report.tracks;
+        trackGround.emplace_back();
+        trackBarriers.emplace_back();
         for (const TopChunk& chunk : TopChunks(bundle)) {
             if (chunk.id != kChunkPolygons) continue;
             const auto [data, size] = Payload(bundle, chunk);
@@ -220,25 +268,39 @@ bool WriteU1FreeRoamBundle(const std::wstring& gameFolder, u32 track, const std:
                 Record r;
                 std::memcpy(r.data(), data + at, 32);
                 r[0] = 0;   // the query's "taken" mark
-                if (!seen.insert(KeyOf(Decode(r))).second) { ++report.duplicates; continue; }
+                const Decoded d = Decode(r);
+                const GeometryKey key = KeyOf(d);
+                if (d.flags & kFlagWall) trackBarriers.back().insert(key);
+                else if (!(d.flags & kFlagVertical)) trackGround.back().push_back(d);
+                if (!seen.insert(key).second) { ++report.duplicates; continue; }
                 records.push_back(r);
             }
         }
     }
 
-    // The race barriers out.
+    std::vector<GroundIndex> trackGroundIndex(trackGround.size());
+    for (size_t t = 0; t < trackGround.size(); ++t)
+        for (const Decoded& d : trackGround[t]) trackGroundIndex[t].Add(d);
+
+    // U1's race barriers are the walls with real height (flag 0x02 without
+    // 0x04: corners with z, e.g. 17.3 to 41 m): every one is out. The city's
+    // walls are the barriers (0x04: two ends, unbounded height): they stay,
+    // but for the ones a race closes a street with (DrivenThroughElsewhere).
     std::vector<Decoded> decoded;
     decoded.reserve(records.size());
     for (const Record& r : records) decoded.push_back(Decode(r));
-    GroundIndex ground;
-    for (const Decoded& d : decoded)
-        if (!(d.flags & (kFlagVertical | kFlagWall))) ground.Add(d);
     std::vector<Record> kept;
     std::vector<const Decoded*> keptDecoded;
     for (size_t i = 0; i < records.size(); ++i) {
         if (decoded[i].flags & kFlagWall) {
-            if (RaceBarrier(decoded[i], ground)) { ++report.raceBarriers; continue; }
+            if (DrivenThroughElsewhere(decoded[i], KeyOf(decoded[i]), trackGroundIndex, trackBarriers)) {
+                ++report.raceBarriers;
+                continue;
+            }
             ++report.cityWalls;
+        } else if (decoded[i].flags & kFlagVertical) {
+            ++report.raceBarriers;
+            continue;
         }
         kept.push_back(records[i]);
         keptDecoded.push_back(&decoded[i]);
@@ -346,8 +408,8 @@ bool WriteU1FreeRoamBundle(const std::wstring& gameFolder, u32 track, const std:
     std::fclose(file);
     if (!ok) report.error = L"could not write " + report.path;
     LOG_INFO("free roam bundle %S: %zu tracks, %zu polygons (%zu duplicates, %zu race barriers out, %zu walls kept), "
-             "%zu cells, %zu nodes", report.path.c_str(), report.tracks, report.polygons, report.duplicates,
-             report.raceBarriers, report.cityWalls, cells.size(), nodes.size());
+             "%zu cells, %zu nodes, %zu reset zones off", report.path.c_str(), report.tracks, report.polygons,
+             report.duplicates, report.raceBarriers, report.cityWalls, cells.size(), nodes.size(), report.resetZonesOff);
     return ok;
 }
 
