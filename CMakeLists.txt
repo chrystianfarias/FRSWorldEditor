@@ -22,6 +22,7 @@ add_executable(FRSWorldEditor WIN32
     src/io/MeshOverlay.cpp
     src/io/ModelCopy.cpp
     src/io/U1Convert.cpp
+    src/io/MWConvert.cpp
     src/io/ObjMesh.cpp
     src/io/PlacementWrite.cpp
     src/io/SectionRebuild.cpp
@@ -110,6 +111,7 @@ add_executable(FRSWorldEditor WIN32
     src/ui/MeshTools.cpp
     src/ui/ModelCatalog.cpp
     src/ui/U1Library.cpp
+    src/ui/MWLibrary.cpp
     src/ui/SetupWizard.cpp
     src/ui/WorldDialogs.cpp
 

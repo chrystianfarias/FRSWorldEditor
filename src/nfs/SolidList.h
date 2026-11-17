@@ -3,6 +3,7 @@
 #include "core/Math.h"
 #include "core/Types.h"
 #include "nfs/ChunkReader.h"
+#include "nfs/Game.h"
 
 #include <string>
 #include <vector>
@@ -109,10 +110,15 @@ struct SolidList {
 };
 
 // Parses one 0x80134000 pack. Returns false when the pack holds no geometry.
-bool ParseSolidList(const Chunk& pack, SolidList& out);
+bool ParseSolidList(const Chunk& pack, SolidList& out, Game game = Game::Underground2);
 
 // Parses one 0x80134010 object.
-bool ParseSolidObject(const Chunk& objectChunk, SolidObject& out);
+//
+// Most Wanted's objects come out the same: its vertex buffers (one per run of
+// materials with the same effect) are joined into `vertices` and the indices
+// rebased onto them. Such an object has no single run of vertices in the
+// file, so vertexFileOffset and vertexStride stay 0 -- nothing may write it.
+bool ParseSolidObject(const Chunk& objectChunk, SolidObject& out, Game game = Game::Underground2);
 
 // Walks `buffer` and parses every solid pack it contains, appending to `out`.
 // `fileOffset` is where the buffer starts inside the stream file, which the

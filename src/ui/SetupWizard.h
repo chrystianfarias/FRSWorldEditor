@@ -56,6 +56,8 @@ void StoreOtherGameFolder(const wchar_t* game, const std::wstring& folder);
 // Where Need for Speed Underground is installed, as far as the registry and
 // the usual places know.
 std::wstring DetectUnderground1Folder();
+// The same for Need for Speed Most Wanted.
+std::wstring DetectMostWantedFolder();
 
 // Where the game is installed, as far as the registry and the usual places
 // know. Empty when it was not found.

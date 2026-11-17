@@ -3,6 +3,7 @@
 #include "core/Math.h"
 #include "core/Types.h"
 #include "nfs/ChunkReader.h"
+#include "nfs/Game.h"
 
 #include <string>
 #include <vector>
@@ -60,7 +61,8 @@ class SectionTable {
 public:
     // Parses chunk 0x00034110 out of an already-mapped L4Rx.BUN, or
     // Underground 1's chunk 0x00034107 out of an unpacked TRACKB<n>.LZC.
-    bool Parse(ByteSpan bunFile);
+    // Most Wanted's 0x00034110 has 0x5C-byte entries (see the .cpp).
+    bool Parse(ByteSpan bunFile, Game game = Game::Underground2);
 
     const std::vector<Section>& Sections() const { return sections_; }
 

@@ -39,6 +39,20 @@ constexpr size_t kU1InstFlags         = 0x0E;
 constexpr size_t kU1InstTranslation   = 0x10;
 constexpr size_t kU1InstRotation      = 0x1C;
 
+// --- Most Wanted (Scenery.hpp of the decompilation) ---------------------------
+// SceneryInfo, 0x48: char DebugName[24], u32 NameHash[4] (high, medium, low
+// detail, reflection) at 0x18, eModel* [4], float Radius at 0x38, mesh
+// checksum, hierarchy hash, pointer.
+constexpr size_t kMWInfoEntrySize = 0x48;
+constexpr size_t kMWInfoNameSize  = 24;
+constexpr size_t kMWInfoSolidHash = 0x18;
+constexpr size_t kMWInfoRadius    = 0x38;
+// SceneryInstance, 0x40: bounds min/max at 0x00/0x0C, u32 ExcludeFlags at
+// 0x18, i16 preculler info and lighting context, position at 0x20, i16
+// rotation[9] at 0x2C (the same fixed point), i16 SceneryInfoNumber at 0x3E.
+constexpr size_t kMWInstFlags     = 0x18;
+constexpr size_t kMWInstInfoIndex = 0x3E;
+
 // The rotation matrix is fixed point with 1.0 stored as 0x2000. Scale is baked
 // into it, so the rows are only unit length for instances drawn at 1:1.
 constexpr float kRotationScale = 1.0f / 8192.0f;
@@ -75,7 +89,8 @@ Mat4 ReadTransform(ByteSpan entry, size_t rotationAt = kInstRotation, size_t tra
 
 } // namespace
 
-bool ParseScenery(const Chunk& sceneryChunk, Scenery& out, bool underground1) {
+bool ParseScenery(const Chunk& sceneryChunk, Scenery& out, Game game) {
+    const bool underground1 = game == Game::Underground1;
     ByteSpan infoData, instanceData;
 
     ChunkReader reader = ChunkReader::Children(sceneryChunk);
@@ -127,6 +142,35 @@ bool ParseScenery(const Chunk& sceneryChunk, Scenery& out, bool underground1) {
             // culling from clipping what pokes past the stored box.
             instance.worldBounds.min = instance.worldBounds.min - Vec3{ 1.0f, 1.0f, 1.0f };
             instance.worldBounds.max = instance.worldBounds.max + Vec3{ 1.0f, 1.0f, 1.0f };
+            if (instance.infoIndex >= out.infos.size()) continue;
+            out.instances.push_back(instance);
+        }
+        return !out.instances.empty();
+    }
+
+    if (game == Game::MostWanted) {
+        const size_t infoCount = infoData.size / kMWInfoEntrySize;
+        out.infos.reserve(out.infos.size() + infoCount);
+        for (size_t i = 0; i < infoCount; ++i) {
+            const ByteSpan entry = infoData.sub(i * kMWInfoEntrySize, kMWInfoEntrySize);
+            SceneryInfo info;
+            info.name      = ReadName(entry, 0, kMWInfoNameSize);
+            info.solidHash = entry.read<u32>(kMWInfoSolidHash);
+            info.radius    = entry.read<float>(kMWInfoRadius);
+            info.raw.assign(entry.data, entry.data + entry.size);
+            out.infos.push_back(std::move(info));
+        }
+        const size_t instanceCount = instanceData.size / kInstanceEntrySize;
+        out.instances.reserve(out.instances.size() + instanceCount);
+        for (size_t i = 0; i < instanceCount; ++i) {
+            const ByteSpan entry = instanceData.sub(i * kInstanceEntrySize, kInstanceEntrySize);
+            SceneryInstance instance;
+            instance.infoIndex       = infoBase + entry.read<u16>(kMWInstInfoIndex);
+            instance.flags           = entry.read<u32>(kMWInstFlags);
+            instance.record          = (u32)i;
+            instance.transform       = ReadTransform(entry);
+            instance.worldBounds.min = ReadVec3(entry, kInstBoundsMin);
+            instance.worldBounds.max = ReadVec3(entry, kInstBoundsMax);
             if (instance.infoIndex >= out.infos.size()) continue;
             out.instances.push_back(instance);
         }

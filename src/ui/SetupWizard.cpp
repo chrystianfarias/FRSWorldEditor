@@ -385,7 +385,7 @@ std::wstring DescribeRow(int row, const std::wstring& folder) {
         }
     }
     if (row == kRowUnderground1) return L"Found. Its models are in the library; its worlds open to look at and export.";
-    if (row == kRowMostWanted) return L"Found. Its worlds open to look at and export.";
+    if (row == kRowMostWanted) return L"Found. Its models are in the library; its worlds open to look at and export.";
     std::wstring text = SupportedExecutable(folder) ? L"Found, v1.2." : L"Found, not v1.2: the plugins leave it alone.";
     std::vector<std::wstring> present;
     if (WorldLoaderInstalled(folder)) present.push_back(L"FRS World Loader");
@@ -404,8 +404,7 @@ void DescribeFolder(HWND dialog) {
         const std::wstring folder = Trimmed(TextOf(dialog, kRowControls[row].path));
         SetText(dialog, kRowControls[row].status, DescribeRow(row, folder));
         if (!folder.empty() && !RowValid(row, folder)) wrong = true;
-        // Most Wanted's worlds open in a later version: listed once the reader is there.
-        if (RowValid(row, folder) && row != kRowMostWanted) found.push_back(row);
+        if (RowValid(row, folder)) found.push_back(row);
     }
     HWND combo = ::GetDlgItem(dialog, IDC_SETUP_MAIN);
     int was = -1;
@@ -473,7 +472,9 @@ INT_PTR CALLBACK FolderPage(HWND dialog, UINT message, WPARAM wParam, LPARAM lPa
             SetText(dialog, IDC_SETUP_U1_PATH, c.underground1Folder);
             SetText(dialog, IDC_SETUP_MW_PATH, c.mostWantedFolder);
             // The game edited until now stays the one chosen.
-            const int main = IsUnderground1Folder(c.folder) ? kRowUnderground1 : kRowUnderground2;
+            const int main = IsMostWantedFolder(c.folder)     ? kRowMostWanted
+                             : IsUnderground1Folder(c.folder) ? kRowUnderground1
+                                                              : kRowUnderground2;
             ::SetPropW(dialog, L"FRSMainRow", (HANDLE)(INT_PTR)(main + 1));
             return TRUE;
         }
@@ -730,6 +731,37 @@ std::wstring DetectUnderground1Folder() {
     return {};
 }
 
+std::wstring DetectMostWantedFolder() {
+    const wchar_t* keys[] = { L"SOFTWARE\\EA GAMES\\Need for Speed Most Wanted",
+                              L"SOFTWARE\\Electronic Arts\\Need for Speed Most Wanted" };
+    for (HKEY root : { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER })
+        for (const wchar_t* key : keys)
+            for (DWORD view : { (DWORD)KEY_WOW64_32KEY, (DWORD)KEY_WOW64_64KEY })
+                for (const wchar_t* value : { L"Install Dir", L"InstallDir", L"Install Path" }) {
+                    wchar_t path[MAX_PATH] = {};
+                    DWORD size = sizeof(path);
+                    if (::RegGetValueW(root, key, value, RRF_RT_REG_SZ | view, nullptr, path, &size) == ERROR_SUCCESS) {
+                        std::wstring folder = Trimmed(path);
+                        while (!folder.empty() && folder.back() == L'\\') folder.pop_back();
+                        if (IsMostWantedFolder(folder)) return folder;
+                    }
+                }
+    wchar_t buffer[MAX_PATH] = {};
+    std::vector<std::wstring> candidates;
+    for (const wchar_t* variable : { L"ProgramFiles(x86)", L"ProgramFiles" })
+        if (::GetEnvironmentVariableW(variable, buffer, MAX_PATH))
+            for (const wchar_t* tail : { L"\\EA GAMES\\Need for Speed Most Wanted", L"\\Need for Speed Most Wanted" })
+                candidates.push_back(std::wstring(buffer) + tail);
+    for (wchar_t drive = L'C'; drive <= L'H'; ++drive)
+        for (const wchar_t* tail : { L":\\Games\\Need For Speed Most Wanted Black Edition",
+                                     L":\\Games\\Need for Speed Most Wanted", L":\\Games\\NFS Most Wanted",
+                                     L":\\Games\\NFSMW", L":\\NFSMW" })
+            candidates.push_back(std::wstring(1, drive) + tail);
+    for (const std::wstring& folder : candidates)
+        if (IsMostWantedFolder(folder)) return folder;
+    return {};
+}
+
 std::wstring DetectGameFolder() {
     // The installer's own record, in either view of the registry.
     const wchar_t* keys[] = { L"SOFTWARE\\EA GAMES\\Need for Speed Underground 2",
@@ -775,12 +807,15 @@ bool RunSetupWizard(HINSTANCE instance, HWND owner, std::wstring& folder) {
     // Every game's folder: the one edited, else as stored, else found -- the
     // first time, the games installed are proposed.
     SetupChoices& c = wizard.choices;
-    c.underground2Folder = IsUnderground1Folder(c.folder) ? OtherGameFolder(L"Underground2") : c.folder;
+    const bool otherGame = IsUnderground1Folder(c.folder) || IsMostWantedFolder(c.folder);
+    c.underground2Folder = otherGame ? OtherGameFolder(L"Underground2") : c.folder;
     if (c.underground2Folder.empty() && !HasOtherGameFolder(L"Underground2")) c.underground2Folder = DetectGameFolder();
     c.underground1Folder = IsUnderground1Folder(c.folder) ? c.folder : OtherGameFolder(L"Underground1");
     if (c.underground1Folder.empty() && !HasOtherGameFolder(L"Underground1"))
         c.underground1Folder = DetectUnderground1Folder();
-    c.mostWantedFolder = OtherGameFolder(L"MostWanted");
+    c.mostWantedFolder = IsMostWantedFolder(c.folder) ? c.folder : OtherGameFolder(L"MostWanted");
+    if (c.mostWantedFolder.empty() && !HasOtherGameFolder(L"MostWanted"))
+        c.mostWantedFolder = DetectMostWantedFolder();
 
     PROPSHEETPAGEW pages[] = {
         Page(instance, IDD_SETUP_FOLDER, FolderPage, L"Your games", &wizard),

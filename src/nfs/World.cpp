@@ -96,8 +96,22 @@ std::vector<std::wstring> World::AvailableRegions(const std::wstring& tracksDire
     return regions;
 }
 
+const wchar_t* World::GameName() const {
+    switch (game_) {
+        case Game::Underground1: return L"Need for Speed Underground";
+        case Game::MostWanted:   return L"Need for Speed Most Wanted";
+        default:                 return L"Need for Speed Underground 2";
+    }
+}
+
+bool World::IsMostWantedRegion(const std::wstring& region) {
+    return region.size() >= 3 && (region[0] == L'L' || region[0] == L'l') && region[1] == L'2' &&
+           (region[2] == L'R' || region[2] == L'r');
+}
+
 bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region) {
     Close();
+    game_ = IsMostWantedRegion(region) ? Game::MostWanted : Game::Underground2;
 
     // A region the editor made reads the files of the region it copies; its
     // edits keep its own name (nfs/CustomRegions.h).
@@ -125,13 +139,15 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
 
     // Visibility is optional: a region without it simply falls back to
     // drawing by distance, which is worse but not fatal.
-    preculler_.Parse(layout_.Span());
+    preculler_.Parse(layout_.Span(), false, IsMostWanted());
 
     // The edits live beside the game, not in it, so they are gathered here and
     // applied to each mesh as its section is parsed. That way the viewport and
     // the running game are looking at the same geometry.
     overlays_.clear();
-    if (!overlayFolder_.empty()) {
+    spans_.clear();
+    // Nothing is ever written for Most Wanted, so there are no edits to read back.
+    if (!overlayFolder_.empty() && !IsMostWanted()) {
         const size_t loaded = ReadMeshOverlays(overlayFolder_, region, overlays_);
         if (loaded) LOG_INFO("%zu edited meshes loaded from the models folder", loaded);
 
@@ -146,7 +162,7 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
     // visibility their zones, beside everything the shipped file has at the
     // same offsets.
     std::vector<u8> served;
-    if (!overlayFolder_.empty() &&
+    if (!overlayFolder_.empty() && !IsMostWanted() &&
         ::GetFileAttributesW((overlayFolder_ + L"\\imports-" + region + L".txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
         FileMap copy;
         if (copy.Open(overlayFolder_ + L"\\files\\TRACKS\\" + region + L".BUN")) {
@@ -155,7 +171,7 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
             LOG_INFO("region %S: its table and zones read from the served copy (imports)", region.c_str());
         }
     }
-    if (!table_.Parse(served.empty() ? layout_.Span() : ByteSpan{ served.data(), served.size() })) {
+    if (!table_.Parse(served.empty() ? layout_.Span() : ByteSpan{ served.data(), served.size() }, game_)) {
         Close();
         return false;
     }
@@ -185,7 +201,12 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
     // An empty region has none of its source's moving objects (planes, trams,
     // doors): the region file the game reads has them taken out too
     // (io/RegionCreate.h, ApplyEmptyRegionLists).
-    if (!emptyCity_) objectAnimations_.Parse(layout_.Span());
+    // Most Wanted's moving objects are EAGL4 animations (0x00E34010), not
+    // read yet.
+    if (!emptyCity_ && !IsMostWanted()) objectAnimations_.Parse(layout_.Span());
+    if (IsMostWanted())
+        LOG_INFO("Most Wanted region %S: %zu sections, %zu visibility zones (read-only)", region.c_str(),
+                 table_.Sections().size(), preculler_.ZoneCount());
 
     region_ = region;
     sectionToLoaded_.assign(table_.Sections().size(), -1);
@@ -390,7 +411,7 @@ const LoadedSection* World::LoadSection(const Section& section) {
     while (reader.Next(chunk)) {
         if (chunk.id == kChunkSolidListPack) {
             SolidList list;
-            if (ParseSolidList(chunk, list)) {
+            if (ParseSolidList(chunk, list, game_)) {
                 // An edited mesh replaces its positions here, before anything
                 // measures bounds or uploads it, so every consumer sees the
                 // shape the game will be handed and not the shipped one.
@@ -462,7 +483,7 @@ const LoadedSection* World::LoadSection(const Section& section) {
 
             Scenery& scenery = loadedSection->scenery;
             const size_t before = scenery.instances.size();
-            ParseScenery(chunk, scenery, IsUnderground1());
+            ParseScenery(chunk, scenery, game_);
             for (size_t i = before; i < scenery.instances.size(); ++i)
                 scenery.instances[i].sceneryNumber = info.number;
 
@@ -837,7 +858,11 @@ void World::OpenGlobalPacks(const std::wstring& tracksDirectory) {
         ::FindClose(search);
     }
     for (const std::wstring& path : paths) {
-        if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        // Missing, or empty: Most Wanted ships TRACKS\LOC2DYNTEX.BIN with no bytes.
+        WIN32_FILE_ATTRIBUTE_DATA attributes{};
+        if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &attributes) ||
+            (attributes.nFileSizeLow == 0 && attributes.nFileSizeHigh == 0))
+            continue;
 
         auto file = std::make_unique<FileMap>();
         if (!file->Open(path)) continue;

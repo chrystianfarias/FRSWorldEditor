@@ -105,8 +105,8 @@ void Collect(State& state) {
 // less the ones that cannot outlive what was ticked. (Extension rows are
 // taken out by EditsPanel::RevertTicked before this.)
 bool RevertRows(HWND dialog, const std::set<size_t>& ticked, State& state) {
-    if (state.world && state.world->IsUnderground1()) {
-        ::MessageBoxW(dialog, L"Need for Speed Underground regions are read-only for now: the editor can show and export them, but nothing it writes would reach the game.", L"Region edits", MB_ICONINFORMATION | MB_OK);
+    if (state.world && state.world->IsReadOnly()) {
+        ::MessageBoxW(dialog, (std::wstring(state.world->GameName()) + L" regions are read-only for now: the editor can show and export them, but nothing it writes would reach the game.").c_str(), L"Region edits", MB_ICONINFORMATION | MB_OK);
         return false;
     }
     if (ticked.empty()) {

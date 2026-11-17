@@ -28,7 +28,11 @@ public:
     // u16 id, u16 point count, then up to 16 points with no bounding box
     // before them) and 0x00034152 the lists, laid out as Underground 2's. Its
     // zone ids are the section numbers of the drivable sections.
-    bool Parse(ByteSpan bunFile, bool underground1 = false);
+    //
+    // Most Wanted has Underground 2's children with a different list record:
+    // u32 0, u16 zone id at +4, u8 count and u8 room at +6, u16 count at +8,
+    // then the u16 section numbers from +10.
+    bool Parse(ByteSpan bunFile, bool underground1 = false, bool mostWanted = false);
 
     bool IsEmpty() const { return zones_.empty(); }
 

@@ -1,4 +1,5 @@
 #include "core/Log.h"
+#include "io/MWConvert.h"
 #include "ui/MainWindow.h"
 #include "ui/SetupWizard.h"
 #include "ui/U1Library.h"
@@ -53,6 +54,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand) {
         if (args) ::LocalFree(args);
         if (selfTest) {
             const int result = RunU1SelfTest(folder);
+            ::CoUninitialize();
+            return result;
+        }
+    }
+
+    // A check of Most Wanted's models in Underground 2's layout, with no window.
+    {
+        int count = 0;
+        LPWSTR* args = ::CommandLineToArgvW(::GetCommandLineW(), &count);
+        const bool selfTest = args && count >= 3 && ::lstrcmpiW(args[1], L"--mw-selftest") == 0;
+        const std::wstring folder = selfTest ? args[2] : L"";
+        if (args) ::LocalFree(args);
+        if (selfTest) {
+            const int result = RunMWSelfTest(folder);
             ::CoUninitialize();
             return result;
         }

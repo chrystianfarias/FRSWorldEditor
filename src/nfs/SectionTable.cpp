@@ -31,6 +31,17 @@ constexpr size_t kOffHash         = 0x30;
 constexpr u32    kChunkSectionTableU1  = 0x00034107;
 constexpr size_t kSectionEntrySizeU1   = 56;
 
+// Most Wanted (TrackStreamingSection, 0x5C bytes): char name[8], i16 number
+// at 0x08, file type 0x10, offset 0x14, size 0x18, compressed size 0x1C (the
+// same: nothing is compressed), size without the texture data 0x20 (what is
+// left once the pixels went to the card), priority 0x24, centre x/y 0x28 and
+// radius 0x30, checksum 0x34, the rest filled at run time.
+constexpr size_t kSectionEntrySizeMW   = 0x5C;
+constexpr size_t kOffPermSizeMW        = 0x20;
+constexpr size_t kOffPriorityMW        = 0x24;
+constexpr size_t kOffCentreMW          = 0x28;
+constexpr size_t kOffChecksumMW        = 0x34;
+
 std::string DecodeName(u32 packed) {
     char text[5] = {};
     for (int i = 0; i < 4; ++i) {
@@ -43,7 +54,7 @@ std::string DecodeName(u32 packed) {
 
 } // namespace
 
-bool SectionTable::Parse(ByteSpan bunFile) {
+bool SectionTable::Parse(ByteSpan bunFile, Game game) {
     sections_.clear();
 
     ChunkReader reader(bunFile, 0);
@@ -90,6 +101,31 @@ bool SectionTable::Parse(ByteSpan bunFile) {
         }
         LOG_INFO("section table (Underground 1): %zu sections, %zu of the track's own stream left out",
                  sections_.size(), trackOwn);
+        return !sections_.empty();
+    }
+
+    if (game == Game::MostWanted) {
+        const size_t count = table.size / kSectionEntrySizeMW;
+        sections_.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            const ByteSpan entry = table.sub(i * kSectionEntrySizeMW, kSectionEntrySizeMW);
+            Section section;
+            section.tableEntryOffset = chunkDataOffset + i * kSectionEntrySizeMW;
+            section.id           = entry.read<u32>(kOffName);
+            section.name         = DecodeName(section.id);
+            section.number       = entry.read<u16>(kOffNumber);
+            section.streamOffset = entry.read<u32>(kOffStreamOffset);
+            section.streamSize   = entry.read<u32>(kOffStreamSize);
+            section.geometrySize = entry.read<u32>(kOffPermSizeMW);
+            section.order        = entry.read<u32>(kOffPriorityMW);
+            section.hash         = entry.read<u32>(kOffChecksumMW);
+            section.position     = { entry.read<float>(kOffCentreMW), entry.read<float>(kOffCentreMW + 4), 0.0f };
+            section.originalStreamOffset = section.streamOffset;
+            section.originalStreamSize   = section.streamSize;
+            section.originalOtherSize    = section.geometrySize;
+            sections_.push_back(std::move(section));
+        }
+        LOG_INFO("section table (Most Wanted): %zu sections", sections_.size());
         return !sections_.empty();
     }
 

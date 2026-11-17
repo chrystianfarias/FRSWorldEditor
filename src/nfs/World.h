@@ -5,6 +5,7 @@
 #include "io/MeshOverlay.h"
 #include "nfs/WorldAnimation.h"
 #include "nfs/Collision.h"
+#include "nfs/Game.h"
 #include "nfs/Preculler.h"
 #include "nfs/SectionTable.h"
 #include "nfs/Scenery.h"
@@ -96,9 +97,6 @@ struct TextureAnimation {
     float            fps = 0.0f;
 };
 
-// The games whose worlds the editor reads.
-enum class Game { Underground2, Underground1 };
-
 // One track region: the L4Rx.BUN layout file plus its STREAML4Rx.BUN payload.
 //
 // Underground 1 has no layout file per region: each track has a bundle,
@@ -130,6 +128,15 @@ public:
 
     Game GameKind() const { return game_; }
     bool IsUnderground1() const { return game_ == Game::Underground1; }
+    bool IsMostWanted() const { return game_ == Game::MostWanted; }
+    // Only Underground 2's regions can be written: the plugins that hand the
+    // game an edit are written for it. The others open to look at and export.
+    bool IsReadOnly() const { return game_ != Game::Underground2; }
+    // The game's name for messages: "Need for Speed Most Wanted", ...
+    const wchar_t* GameName() const;
+
+    // Most Wanted's regions are named after its location, 2: L2RA (Rockport).
+    static bool IsMostWantedRegion(const std::wstring& region);
     // An empty region the editor made (nfs/CustomRegions.h): its source's city
     // hidden, and taken out of every section it saves.
     bool EmptyCity() const { return emptyCity_; }

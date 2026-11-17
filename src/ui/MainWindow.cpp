@@ -32,6 +32,7 @@
 #include "ui/MarkersExtension.h"
 #include "ui/RoadsExtension.h"
 #include "ui/U1Library.h"
+#include "ui/MWLibrary.h"
 #include "ui/SetupWizard.h"
 #include "ui/WorldDialogs.h"
 
@@ -689,6 +690,8 @@ void MainWindow::OnCreate() {
     extensions_.push_back(CreateRoadsExtension(*this));
     // Need for Speed Underground's models in the library (ui/U1Library.h).
     extensions_.push_back(CreateU1Library(*this));
+    // And Need for Speed Most Wanted's (ui/MWLibrary.h).
+    extensions_.push_back(CreateMWLibrary(*this));
     // The mesh editor (ui/MeshTools.h), asked before the collision tools so
     // that while it edits, Ctrl+Z steps its own edit back.
     {
@@ -1463,8 +1466,8 @@ void MainWindow::ShowAbout() {
 // an edit are written for Underground 2. True (and says so) when the open
 // region is one.
 bool MainWindow::RefuseReadOnlyWorld() {
-    if (!world_ || !world_->IsUnderground1()) return false;
-    ::MessageBoxW(window_, L"Need for Speed Underground regions are read-only for now: the editor can show and export them, but nothing it writes would reach the game.", kWindowTitle, MB_ICONINFORMATION | MB_OK);
+    if (!world_ || !world_->IsReadOnly()) return false;
+    ::MessageBoxW(window_, (std::wstring(world_->GameName()) + L" regions are read-only for now: the editor can show and export them, but nothing it writes would reach the game.").c_str(), kWindowTitle, MB_ICONINFORMATION | MB_OK);
     return true;
 }
 
@@ -1474,6 +1477,8 @@ void MainWindow::UpdateTitle() {
         title += L" - " + world_->Region();
         if (world_->IsUnderground1())
             title += L" (Underground, track " + std::to_wstring(world_->TrackNumber()) + L", read-only)";
+        else if (world_->IsMostWanted())
+            title += L" (Most Wanted, read-only)";
     }
     if (!gameFolder_.empty()) title += L" [" + worldName_ + L"]";
     ::SetWindowTextW(window_, title.c_str());
@@ -2691,7 +2696,7 @@ void MainWindow::OpenRegion(std::wstring region) {
     }
     // Sections whose edited bytes share stream space (io/SectionSplice.h):
     // moved apart, and the region read again with them where they now are.
-    if (!world->IsUnderground1() && RepairOverlappingSpans(*world, modelsFolder_) > 0 &&
+    if (!world->IsReadOnly() && RepairOverlappingSpans(*world, modelsFolder_) > 0 &&
         !world->Open(tracksFolder_, region)) {
         ::MessageBoxW(window_, Format(L"Could not open region %s.", region.c_str()).c_str(),
                       kWindowTitle, MB_ICONERROR | MB_OK);
@@ -3447,7 +3452,7 @@ bool MainWindow::ConfirmUnsavedPlacements() {
         ~Asking() { flag = false; }
     } guard(asking);
     // Nothing of an Underground 1 region can be written: the edits just go.
-    if (world_->IsUnderground1()) {
+    if (world_->IsReadOnly()) {
         for (const auto& section : world_->Loaded()) {
             section->placementsChanged = false;
             section->collisionChanged = false;

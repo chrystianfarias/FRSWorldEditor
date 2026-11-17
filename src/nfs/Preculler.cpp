@@ -41,7 +41,7 @@ std::vector<std::pair<size_t, size_t>> RecordBodies(ByteSpan span) {
 
 } // namespace
 
-bool Preculler::Parse(ByteSpan bunFile, bool underground1) {
+bool Preculler::Parse(ByteSpan bunFile, bool underground1, bool mostWanted) {
     zones_.clear();
     visible_.clear();
     records_.clear();
@@ -119,14 +119,15 @@ bool Preculler::Parse(ByteSpan bunFile, bool underground1) {
             for (const auto& [offset, length] : RecordBodies(child.data)) {
                 const ByteSpan body = child.data.sub(offset, length);
 
-                const u32 id    = body.read<u16>(0);
-                const u32 count = body.read<u32>(8);
-                if (count == 0 || 12 + (size_t)count * 2 > body.size) continue;
+                const u32 id    = body.read<u16>(mostWanted ? 4 : 0);
+                const u32 count = mostWanted ? body.read<u16>(8) : body.read<u32>(8);
+                const size_t first = mostWanted ? 10 : 12;
+                if (count == 0 || first + (size_t)count * 2 > body.size) continue;
 
                 std::vector<u32> sections;
                 sections.reserve(count);
                 for (u32 i = 0; i < count; ++i)
-                    sections.push_back(body.read<u16>(12 + i * 2));
+                    sections.push_back(body.read<u16>(first + i * 2));
 
                 visible_[id] = std::move(sections);
                 records_[id] = { (u64)(child.data.data - bunFile.data) + offset, (u32)length };

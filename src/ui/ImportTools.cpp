@@ -111,7 +111,7 @@ bool ImportTools::OnCommand(int id) {
         return true;
     }
     nfs::CustomRegion custom;
-    if (world->IsUnderground1() || nfs::FindCustomRegion(Game(), world->Region(), custom)) {
+    if (world->IsReadOnly() || nfs::FindCustomRegion(Game(), world->Region(), custom)) {
         ::MessageBoxW(host_.window,
                       L"Regions can be brought into one of the game's own Underground 2 regions only, for now.",
                       L"Import Region", MB_ICONINFORMATION | MB_OK);

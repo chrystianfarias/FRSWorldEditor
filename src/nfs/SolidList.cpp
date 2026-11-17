@@ -2,6 +2,7 @@
 
 #include "core/Log.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace nfs {
@@ -21,6 +22,9 @@ constexpr size_t kHdrName      = 0xA4;  // zero-terminated ASCII
 // header sixteen bytes shorter before the name.
 constexpr u32    kHdrVersionU1 = 0x13;
 constexpr size_t kHdrNameU1    = 0x94;
+
+// Most Wanted: the same header, with the name at 0xA0.
+constexpr size_t kHdrNameMW    = 0xA0;
 
 // --- Mesh descriptor, chunk 0x00134900 -------------------------------------
 constexpr size_t kDescNumMaterials = 0x10;
@@ -66,13 +70,14 @@ std::string ReadName(ByteSpan span, size_t offset) {
     return std::string(text, length);
 }
 
-void ParseHeader(ByteSpan data, SolidObject& out) {
+void ParseHeader(ByteSpan data, SolidObject& out, Game game) {
     out.version    = data.read<u32>(kHdrVersion);
     out.hash       = data.read<u32>(kHdrHash);
     out.bounds.min = ReadVec3(data, kHdrBoundsMin);
     out.bounds.max = ReadVec3(data, kHdrBoundsMax);
     out.transform  = ReadMat4(data, kHdrTransform);
-    out.name       = ReadName(data, (out.version & 0xFFFFu) <= kHdrVersionU1 ? kHdrNameU1 : kHdrName);
+    out.name       = ReadName(data, game == Game::MostWanted ? kHdrNameMW
+                                    : (out.version & 0xFFFFu) <= kHdrVersionU1 ? kHdrNameU1 : kHdrName);
     out.kind       = ClassifyObject(out.name);
 }
 
@@ -155,6 +160,124 @@ void ParseIndices(ByteSpan data, u32 triangleCount, SolidObject& out) {
     if (count) std::memcpy(out.indices.data(), data.data, count * 2);
 }
 
+// --- Most Wanted's mesh ------------------------------------------------------
+// Material, chunk 0x00134B02, 0x68 bytes: bounds min/max at 0x00/0x0C, u8
+// texture slots[5] at 0x18 (diffuse, normal, height, specular, opacity; each
+// an index into the object's texture list), then at 0x30 u32 effect, ?,
+// flags, vertex count, triangle count, first index; index count at 0x5C.
+// The vertex buffers (0x00134B01, one chunk each) follow the effect: a new one
+// starts each time the effect changes from one material to the next, and the
+// indices of a material count from the start of its own buffer.
+constexpr size_t kMaterialEntrySizeMW = 0x68;
+constexpr size_t kMatTexturesMW       = 0x18;
+constexpr size_t kMatEffectMW         = 0x30;
+constexpr size_t kMatFlagsMW          = 0x38;
+constexpr size_t kMatVertexCountMW    = 0x3C;
+constexpr size_t kMatFirstIndexMW     = 0x44;
+constexpr size_t kMatIndexCountMW     = 0x5C;
+
+// speed.exe's effect table (0x8F9B60): the vertex size of each effect the
+// world uses. 0 WORLD, 1 WORLDREFLECT, 3 WORLDNORMALMAP, 5 GLOSSYWINDOW,
+// 6 TREE all start pos, normal, colour, uv; 19 the sky adds a second uv.
+u32 EffectStrideMW(u32 effect) {
+    switch (effect) {
+        case 0: case 4: case 5: case 6: case 8: return 36;
+        case 1: case 2: case 3:                 return 60;
+        case 7:                                 return 24;
+        case 19:                                return 44;
+        default:                                return 0;
+    }
+}
+
+bool ParseMeshMW(const Chunk& mesh, SolidObject& out) {
+    ByteSpan materialData, indexData;
+    std::vector<ByteSpan> buffers;
+    ChunkReader reader = ChunkReader::Children(mesh);
+    Chunk part;
+    while (reader.Next(part)) {
+        switch (part.id) {
+            case kChunkMeshMaterials: materialData = part.data; break;
+            case kChunkMeshIndices:   indexData = part.data; break;
+            case kChunkMeshVertices:  buffers.push_back(part.data); break;
+            default: break;
+        }
+    }
+
+    struct Run { u32 effect, vertices; };
+    std::vector<Run> runs;
+    std::vector<u32> materialRun;
+    const size_t count = materialData.size / kMaterialEntrySizeMW;
+    for (size_t i = 0; i < count; ++i) {
+        const ByteSpan entry = materialData.sub(i * kMaterialEntrySizeMW, kMaterialEntrySizeMW);
+        const u32 effect = entry.read<u32>(kMatEffectMW);
+        if (runs.empty() || runs.back().effect != effect) runs.push_back({ effect, 0 });
+        runs.back().vertices += entry.read<u32>(kMatVertexCountMW);
+        materialRun.push_back((u32)runs.size() - 1);
+    }
+    if (runs.size() > buffers.size()) {
+        LOG_WARN("object '%s': %zu vertex buffers for %zu effect runs", out.name.c_str(), buffers.size(), runs.size());
+        return false;
+    }
+
+    // Every buffer widened into the one vertex array, each run's start kept.
+    std::vector<u32> runBase;
+    for (size_t r = 0; r < runs.size(); ++r) {
+        u32 stride = EffectStrideMW(runs[r].effect);
+        if (runs[r].vertices && (!stride || (size_t)stride * runs[r].vertices > buffers[r].size))
+            stride = (u32)(buffers[r].size / runs[r].vertices);
+        if (runs[r].vertices && stride < 24) {
+            LOG_WARN("object '%s': effect %u with a %u-byte vertex", out.name.c_str(), runs[r].effect, stride);
+            return false;
+        }
+        const bool hasNormal = stride >= 36;
+        const size_t colorOffset = hasNormal ? 24 : 12, uvOffset = hasNormal ? 28 : 16;
+        runBase.push_back((u32)out.vertices.size());
+        for (u32 v = 0; v < runs[r].vertices; ++v) {
+            const ByteSpan source = buffers[r].sub((size_t)v * stride, stride);
+            SolidVertex vertex;
+            vertex.position = ReadVec3(source, 0);
+            vertex.normal   = hasNormal ? ReadVec3(source, 12) : Vec3{ 0.0f, 0.0f, 1.0f };
+            vertex.color    = source.read<u32>(colorOffset);
+            vertex.uv       = { source.read<float>(uvOffset), source.read<float>(uvOffset + 4) };
+            out.vertices.push_back(vertex);
+        }
+        if (hasNormal) out.hasNormals = true;
+    }
+    if (out.vertices.size() > 0x10000) {
+        LOG_WARN("object '%s': %zu vertices do not fit 16-bit indices", out.name.c_str(), out.vertices.size());
+        out.vertices.clear();
+        return false;
+    }
+
+    const size_t indexCount = indexData.size / 2;
+    std::vector<u16> source(indexCount);
+    if (indexCount) std::memcpy(source.data(), indexData.data, indexCount * 2);
+    out.indices.clear();
+    out.materials.clear();
+    for (size_t i = 0; i < count; ++i) {
+        const ByteSpan entry = materialData.sub(i * kMaterialEntrySizeMW, kMaterialEntrySizeMW);
+        const u32 first = entry.read<u32>(kMatFirstIndexMW), number = entry.read<u32>(kMatIndexCountMW);
+        if (!number || (size_t)first + number > indexCount) continue;
+        SolidMaterial material;
+        material.firstIndex   = (u32)out.indices.size();
+        material.indexCount   = number;
+        material.textureIndex = entry.read<u8>(kMatTexturesMW);
+        material.flags        = entry.read<u32>(kMatFlagsMW);
+        // The editor's effect pick (render/GpuResources.cpp): 0x40 draws the
+        // road reflection, which Most Wanted gives effect 1 (WORLDREFLECT).
+        material.stripFlags   = entry.read<u32>(kMatEffectMW) == 1 ? 0x40u : 0u;
+        material.bounds.min   = ReadVec3(entry, 0x00);
+        material.bounds.max   = ReadVec3(entry, 0x0C);
+        const u32 base = runBase[materialRun[i]];
+        for (u32 k = 0; k < number; ++k) {
+            const u32 index = source[first + k] + base;
+            out.indices.push_back((u16)std::min<u32>(index, (u32)out.vertices.size() - 1));
+        }
+        out.materials.push_back(material);
+    }
+    return !out.vertices.empty() && !out.indices.empty();
+}
+
 } // namespace
 
 ObjectKind ClassifyObject(const std::string& name) {
@@ -164,7 +287,7 @@ ObjectKind ClassifyObject(const std::string& name) {
     return ObjectKind::Prop;
 }
 
-bool ParseSolidObject(const Chunk& objectChunk, SolidObject& out) {
+bool ParseSolidObject(const Chunk& objectChunk, SolidObject& out, Game game) {
     ChunkReader reader = ChunkReader::Children(objectChunk);
     Chunk child;
 
@@ -175,7 +298,7 @@ bool ParseSolidObject(const Chunk& objectChunk, SolidObject& out) {
     while (reader.Next(child)) {
         switch (child.id) {
             case kChunkSolidObjectHeader:
-                ParseHeader(child.data, out);
+                ParseHeader(child.data, out, game);
                 triangleCount = child.data.read<u32>(kHdrNumTris);
                 break;
 
@@ -184,6 +307,10 @@ bool ParseSolidObject(const Chunk& objectChunk, SolidObject& out) {
                 break;
 
             case kChunkMeshContainer: {
+                if (game == Game::MostWanted) {
+                    if (!ParseMeshMW(child, out)) return false;
+                    break;
+                }
                 ChunkReader mesh = ChunkReader::Children(child);
                 Chunk part;
                 while (mesh.Next(part)) {
@@ -210,6 +337,8 @@ bool ParseSolidObject(const Chunk& objectChunk, SolidObject& out) {
         }
     }
 
+    if (game == Game::MostWanted) return !out.vertices.empty() && !out.indices.empty();
+
     if (!ParseVertices(vertexData, vertexCount, out)) return false;
     ParseIndices(indexData, triangleCount, out);
     ParseMaterials(materialData, out);
@@ -227,7 +356,7 @@ bool ParseSolidObject(const Chunk& objectChunk, SolidObject& out) {
     return !out.vertices.empty() && !out.indices.empty();
 }
 
-bool ParseSolidList(const Chunk& pack, SolidList& out) {
+bool ParseSolidList(const Chunk& pack, SolidList& out, Game game) {
     ChunkReader reader = ChunkReader::Children(pack);
     Chunk child;
 
@@ -239,7 +368,7 @@ bool ParseSolidList(const Chunk& pack, SolidList& out) {
                 out.path = ReadName(info.data, 0x10);
         } else if (child.id == kChunkSolidObject) {
             SolidObject object;
-            if (ParseSolidObject(child, object))
+            if (ParseSolidObject(child, object, game))
                 out.objects.push_back(std::move(object));
         }
     }

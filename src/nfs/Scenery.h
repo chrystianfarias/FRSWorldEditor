@@ -3,6 +3,7 @@
 #include "core/Math.h"
 #include "core/Types.h"
 #include "nfs/ChunkReader.h"
+#include "nfs/Game.h"
 
 #include <string>
 #include <vector>
@@ -51,7 +52,8 @@ struct Scenery {
 // with smaller records: a 72-byte SceneryInfo without a name (the model's
 // hash for each of six detail levels), and 48-byte instances whose bounds are
 // whole units in i16. Its infos come out unnamed; World names them after the
-// model they place.
-bool ParseScenery(const Chunk& sceneryChunk, Scenery& out, bool underground1 = false);
+// model they place. Most Wanted's infos are 72 bytes (name[24], then the
+// model hashes), its 64-byte instances keep the info index at the end.
+bool ParseScenery(const Chunk& sceneryChunk, Scenery& out, Game game = Game::Underground2);
 
 } // namespace nfs
