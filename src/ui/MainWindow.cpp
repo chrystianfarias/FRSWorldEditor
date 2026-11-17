@@ -1494,6 +1494,10 @@ std::wstring MainWindow::WorldDisplayName() const {
 
 void MainWindow::RememberWorldFile() {
     worldSignature_ = io::WorldSignature(modelsFolder_);
+    // A session on another game folder (FRS_GAME_FOLDER, tests) keeps its
+    // world to itself: the stored one belongs to the player's game.
+    const wchar_t* overrideFolder = _wgetenv(L"FRS_GAME_FOLDER");
+    if (overrideFolder && *overrideFolder) return;
     HKEY key = nullptr;
     if (::RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) ==
         ERROR_SUCCESS) {
@@ -1501,6 +1505,9 @@ void MainWindow::RememberWorldFile() {
                          (DWORD)((worldPath_.size() + 1) * sizeof(wchar_t)));
         ::RegSetValueExA(key, "WorldSignature", 0, REG_SZ, (const BYTE*)worldSignature_.c_str(),
                          (DWORD)(worldSignature_.size() + 1));
+        // Which game folder's models the world was opened into.
+        ::RegSetValueExW(key, L"WorldFileGame", 0, REG_SZ, (const BYTE*)gameFolder_.c_str(),
+                         (DWORD)((gameFolder_.size() + 1) * sizeof(wchar_t)));
         ::RegCloseKey(key);
     }
     worldName_ = WorldDisplayName();
@@ -2615,8 +2622,22 @@ void MainWindow::SetGameFolder(const std::wstring& folder) {
     tracksFolder_ = folder + L"\\TRACKS";
     viewport_.GetRenderer().SetGameFolder(folder);
     modelsFolder_ = folder + L"\\models";
-    // The world file last opened or saved, and how <game>\models stood then.
-    {
+    // The world file last opened or saved, and how <game>\models stood then
+    // -- only for the game folder it was opened into. A session on another
+    // folder (FRS_GAME_FOLDER) starts untitled: saving there once wrote a
+    // test folder's edits over the player's last world file.
+    worldPath_.clear();
+    worldSignature_.clear();
+    const wchar_t* overrideFolder = _wgetenv(L"FRS_GAME_FOLDER");
+    bool sameGame = !(overrideFolder && *overrideFolder);
+    if (sameGame) {
+        wchar_t stored[MAX_PATH * 2] = {};
+        DWORD size = sizeof(stored);
+        if (::RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, L"WorldFileGame", RRF_RT_REG_SZ, nullptr, stored, &size) ==
+            ERROR_SUCCESS)
+            sameGame = ::_wcsicmp(stored, folder.c_str()) == 0;
+    }
+    if (sameGame) {
         wchar_t path[MAX_PATH * 2] = {};
         char signature[64] = {};
         DWORD size = sizeof(path);
