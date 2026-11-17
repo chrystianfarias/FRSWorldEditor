@@ -53,6 +53,27 @@ constexpr size_t kMWInfoRadius    = 0x38;
 constexpr size_t kMWInstFlags     = 0x18;
 constexpr size_t kMWInstInfoIndex = 0x3E;
 
+// --- Carbon --------------------------------------------------------------------
+// SceneryInfo: Most Wanted's. Instance, 0x60: bounds min at 0x00, u32
+// ExcludeFlags at 0x0C, bounds max at 0x10, i16 preculler info at 0x1C,
+// position at 0x20, the rotation as float[9] at 0x2C (rows, as Most Wanted's
+// fixed point), the model's hash at 0x50, u32 SceneryInfoNumber at 0x54.
+constexpr size_t kCInstanceEntrySize = 0x60;
+constexpr size_t kCInstFlags         = 0x0C;
+constexpr size_t kCInstBoundsMax     = 0x10;
+constexpr size_t kCInstRotation      = 0x2C;
+constexpr size_t kCInstInfoIndex     = 0x54;
+
+// --- ProStreet (nfs.exe: the loader at 0x74C454, DrawAScenery at 0x74A2A0) ----
+// SceneryInfo, 0x4C: Most Wanted's and a u32 more. Instance, 0x60: bounds min
+// at 0x00, u32 ExcludeFlags at 0x0C, bounds max at 0x10, i16 preculler info at
+// 0x1C, i16 SceneryInfoNumber at 0x1E, position at 0x20, a hash at 0x2C, the
+// rotation rows (float3, the scale baked in) at 0x30, 0x40 and 0x50.
+constexpr size_t kPSInfoEntrySize = 0x4C;
+constexpr size_t kPSInstInfoIndex = 0x1E;
+constexpr size_t kPSInstRotation  = 0x30;
+constexpr size_t kPSInstRowStride = 0x10;
+
 // The rotation matrix is fixed point with 1.0 stored as 0x2000. Scale is baked
 // into it, so the rows are only unit length for instances drawn at 1:1.
 constexpr float kRotationScale = 1.0f / 8192.0f;
@@ -148,17 +169,47 @@ bool ParseScenery(const Chunk& sceneryChunk, Scenery& out, Game game) {
         return !out.instances.empty();
     }
 
-    if (game == Game::MostWanted) {
-        const size_t infoCount = infoData.size / kMWInfoEntrySize;
+    if (game == Game::MostWanted || game == Game::Carbon || game == Game::ProStreet) {
+        const bool proStreet = game == Game::ProStreet;
+        const size_t infoSize = proStreet ? kPSInfoEntrySize : kMWInfoEntrySize;
+        const size_t infoCount = infoData.size / infoSize;
         out.infos.reserve(out.infos.size() + infoCount);
         for (size_t i = 0; i < infoCount; ++i) {
-            const ByteSpan entry = infoData.sub(i * kMWInfoEntrySize, kMWInfoEntrySize);
+            const ByteSpan entry = infoData.sub(i * infoSize, infoSize);
             SceneryInfo info;
             info.name      = ReadName(entry, 0, kMWInfoNameSize);
             info.solidHash = entry.read<u32>(kMWInfoSolidHash);
             info.radius    = entry.read<float>(kMWInfoRadius);
             info.raw.assign(entry.data, entry.data + entry.size);
             out.infos.push_back(std::move(info));
+        }
+        if (game == Game::Carbon || proStreet) {
+            const size_t instanceCount = instanceData.size / kCInstanceEntrySize;
+            out.instances.reserve(out.instances.size() + instanceCount);
+            for (size_t i = 0; i < instanceCount; ++i) {
+                const ByteSpan entry = instanceData.sub(i * kCInstanceEntrySize, kCInstanceEntrySize);
+                SceneryInstance instance;
+                instance.infoIndex = infoBase + (proStreet ? (u32)entry.read<u16>(kPSInstInfoIndex)
+                                                           : entry.read<u32>(kCInstInfoIndex));
+                instance.flags     = entry.read<u32>(kCInstFlags);
+                instance.record    = (u32)i;
+                Mat4 m = Mat4::Identity();
+                for (int row = 0; row < 3; ++row)
+                    for (int col = 0; col < 3; ++col)
+                        m.m[row][col] = entry.read<float>(
+                            proStreet ? kPSInstRotation + (size_t)row * kPSInstRowStride + (size_t)col * 4
+                                      : kCInstRotation + (size_t)(row * 3 + col) * 4);
+                const Vec3 translation = ReadVec3(entry, kInstTranslation);
+                m.m[3][0] = translation.x;
+                m.m[3][1] = translation.y;
+                m.m[3][2] = translation.z;
+                instance.transform       = m;
+                instance.worldBounds.min = ReadVec3(entry, kInstBoundsMin);
+                instance.worldBounds.max = ReadVec3(entry, kCInstBoundsMax);
+                if (instance.infoIndex >= out.infos.size()) continue;
+                out.instances.push_back(instance);
+            }
+            return !out.instances.empty();
         }
         const size_t instanceCount = instanceData.size / kInstanceEntrySize;
         out.instances.reserve(out.instances.size() + instanceCount);

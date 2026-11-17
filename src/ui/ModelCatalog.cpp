@@ -134,14 +134,14 @@ void ModelCatalog::SetWorld(const nfs::World* world) {
             const nfs::ModelCategory category = nfs::CategorizeModel(model->name);
             row.group = category.group;
             row.sub = category.sub;
-            row.game = world->IsUnderground1() ? L"Underground 1" : world->IsMostWanted() ? L"Most Wanted" : L"Underground 2";
+            row.game = world->GameLabel();
             rows_.push_back(std::move(row));
         }
         // Another game's models (nfs/ForeignModels.h), on the same shelves.
         std::unordered_set<u32> listed;
         for (const nfs::ForeignModels* foreign : nfs::ForeignSources()) {
             // The open region's own game is listed as the region.
-            if (foreign->Game() == (world->IsUnderground1() ? L"Underground 1" : world->IsMostWanted() ? L"Most Wanted" : L"Underground 2")) continue;
+            if (foreign->Game() == world->GameLabel()) continue;
             std::vector<const nfs::SolidObject*> models;
             foreign->ListModels(models);
             for (const nfs::SolidObject* model : models) {

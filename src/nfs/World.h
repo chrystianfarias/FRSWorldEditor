@@ -129,14 +129,30 @@ public:
     Game GameKind() const { return game_; }
     bool IsUnderground1() const { return game_ == Game::Underground1; }
     bool IsMostWanted() const { return game_ == Game::MostWanted; }
+    bool IsCarbon() const { return game_ == Game::Carbon; }
+    bool IsProStreet() const { return game_ == Game::ProStreet; }
+    // Most Wanted, Carbon and ProStreet: the same section table and visibility
+    // lists, nothing of the editor's own written beside them.
+    bool HasMostWantedLayout() const {
+        return game_ == Game::MostWanted || game_ == Game::Carbon || game_ == Game::ProStreet;
+    }
     // Only Underground 2's regions can be written: the plugins that hand the
     // game an edit are written for it. The others open to look at and export.
     bool IsReadOnly() const { return game_ != Game::Underground2; }
     // The game's name for messages: "Need for Speed Most Wanted", ...
     const wchar_t* GameName() const;
+    // Its short name, as the Library's Game filter lists it: "Underground 2",
+    // "Most Wanted", "ProStreet", ...
+    const wchar_t* GameLabel() const;
 
     // Most Wanted's regions are named after its location, 2: L2RA (Rockport).
     static bool IsMostWantedRegion(const std::wstring& region);
+    // Carbon's, after location 5: L5RA (Palmont City), L5RB (the front end).
+    static bool IsCarbonRegion(const std::wstring& region);
+    // ProStreet's regions (L6R_Ebisu, ...) are told by the game beside them:
+    // nfs.exe in the folder above TRACKS. Any region there is read as
+    // ProStreet's, Rockport and Palmont brought over by mods too.
+    static bool IsProStreetTracks(const std::wstring& tracksDirectory);
     // An empty region the editor made (nfs/CustomRegions.h): its source's city
     // hidden, and taken out of every section it saves.
     bool EmptyCity() const { return emptyCity_; }

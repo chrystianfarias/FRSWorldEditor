@@ -112,6 +112,7 @@ add_executable(FRSWorldEditor WIN32
     src/ui/ModelCatalog.cpp
     src/ui/U1Library.cpp
     src/ui/MWLibrary.cpp
+    src/ui/PSLibrary.cpp
     src/ui/SetupWizard.cpp
     src/ui/WorldDialogs.cpp
 

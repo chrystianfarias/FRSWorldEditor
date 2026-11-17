@@ -63,11 +63,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand) {
     {
         int count = 0;
         LPWSTR* args = ::CommandLineToArgvW(::GetCommandLineW(), &count);
-        const bool selfTest = args && count >= 3 && ::lstrcmpiW(args[1], L"--mw-selftest") == 0;
+        const bool carbon = args && count >= 3 && ::lstrcmpiW(args[1], L"--carbon-selftest") == 0;
+        const bool proStreet = args && count >= 3 && ::lstrcmpiW(args[1], L"--ps-selftest") == 0;
+        const bool selfTest =
+            carbon || proStreet || (args && count >= 3 && ::lstrcmpiW(args[1], L"--mw-selftest") == 0);
         const std::wstring folder = selfTest ? args[2] : L"";
+        const std::wstring region = selfTest && count >= 4 ? args[3] : L"";
         if (args) ::LocalFree(args);
         if (selfTest) {
-            const int result = RunMWSelfTest(folder);
+            const int result = RunMWSelfTest(folder,
+                                             proStreet ? nfs::Game::ProStreet
+                                             : carbon  ? nfs::Game::Carbon
+                                                       : nfs::Game::MostWanted,
+                                             region);
             ::CoUninitialize();
             return result;
         }

@@ -104,7 +104,8 @@ bool SectionTable::Parse(ByteSpan bunFile, Game game) {
         return !sections_.empty();
     }
 
-    if (game == Game::MostWanted) {
+    // Carbon's entries are Most Wanted's.
+    if (game == Game::MostWanted || game == Game::Carbon || game == Game::ProStreet) {
         const size_t count = table.size / kSectionEntrySizeMW;
         sections_.reserve(count);
         for (size_t i = 0; i < count; ++i) {
@@ -125,7 +126,8 @@ bool SectionTable::Parse(ByteSpan bunFile, Game game) {
             section.originalOtherSize    = section.geometrySize;
             sections_.push_back(std::move(section));
         }
-        LOG_INFO("section table (Most Wanted): %zu sections", sections_.size());
+        LOG_INFO("section table (%s): %zu sections", game == Game::ProStreet ? "ProStreet" : game == Game::Carbon ? "Carbon" : "Most Wanted",
+                 sections_.size());
         return !sections_.empty();
     }
 

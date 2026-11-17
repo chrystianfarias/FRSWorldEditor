@@ -87,6 +87,8 @@ private:
     // other textures the game swaps) keeps each texture as an EA-compressed
     // block holding its pixels, then its 124-byte header and 32-byte format.
     bool ParseCompressed(const Chunk& packChunk, ByteSpan index);
+    // Version 8 (Carbon): headers of their own length, a name of any length.
+    bool ParseVersion8(ByteSpan headers, ByteSpan formats, ByteSpan pixels);
 
     std::string          name_;
     std::vector<Texture> textures_;

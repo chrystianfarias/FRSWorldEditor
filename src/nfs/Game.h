@@ -9,6 +9,15 @@ namespace nfs {
 // STREAML2RA.BUN) and most of its chunks, with wider records in a few places:
 // 0x5C-byte section table entries, 0x68-byte materials with one vertex buffer
 // per run of the same effect, and 0x48-byte scenery infos.
-enum class Game { Underground2, Underground1, MostWanted };
+//
+// Carbon (TRACKS\L5RA.BUN, Palmont City) keeps Most Wanted's layout with
+// 0x90-byte materials (and more vertex layouts), 0x60-byte scenery instances
+// with a float rotation, zone outlines from +0x28 and version 8 texture packs.
+// ProStreet (TRACKS\L6R_<track>.BUN; nfs.exe beside TRACKS) keeps the same files
+// and table, Carbon's zone outlines and Most Wanted's lists, a 0xB8-byte solid
+// header with the name after it, 0x80-byte materials with one vertex buffer
+// each (indices local to it, the stride in the material), 0x4C-byte scenery
+// infos and 0x60-byte instances with float rotation rows.
+enum class Game { Underground2, Underground1, MostWanted, Carbon, ProStreet };
 
 } // namespace nfs

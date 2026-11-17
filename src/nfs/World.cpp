@@ -75,11 +75,13 @@ std::vector<std::wstring> World::AvailableRegions(const std::wstring& tracksDire
     HANDLE handle = ::FindFirstFileW(pattern.c_str(), &find);
     if (handle == INVALID_HANDLE_VALUE) return regions;
 
+    // ProStreet's regions are named after their track: L6R_Ebisu.
+    const bool proStreet = IsProStreetTracks(tracksDirectory);
     do {
         std::wstring name = find.cFileName;               // STREAML4RA.BUN
         if (name.size() <= 10) continue;
         // Underground 1's per-track parts, STREAML1RA_1001.BUN, are not regions.
-        if (name.find(L'_') != std::wstring::npos) continue;
+        if (!proStreet && name.find(L'_') != std::wstring::npos) continue;
         name = name.substr(6, name.size() - 6 - 4);       // L4RA
         regions.push_back(name);
     } while (::FindNextFileW(handle, &find));
@@ -100,6 +102,8 @@ const wchar_t* World::GameName() const {
     switch (game_) {
         case Game::Underground1: return L"Need for Speed Underground";
         case Game::MostWanted:   return L"Need for Speed Most Wanted";
+        case Game::Carbon:       return L"Need for Speed Carbon";
+        case Game::ProStreet:    return L"Need for Speed ProStreet";
         default:                 return L"Need for Speed Underground 2";
     }
 }
@@ -109,9 +113,33 @@ bool World::IsMostWantedRegion(const std::wstring& region) {
            (region[2] == L'R' || region[2] == L'r');
 }
 
+const wchar_t* World::GameLabel() const {
+    switch (game_) {
+        case Game::Underground1: return L"Underground 1";
+        case Game::MostWanted:   return L"Most Wanted";
+        case Game::Carbon:       return L"Carbon";
+        case Game::ProStreet:    return L"ProStreet";
+        default:                 return L"Underground 2";
+    }
+}
+
+bool World::IsProStreetTracks(const std::wstring& tracksDirectory) {
+    const size_t slash = tracksDirectory.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return false;
+    return ::GetFileAttributesW((tracksDirectory.substr(0, slash) + L"\\nfs.exe").c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+bool World::IsCarbonRegion(const std::wstring& region) {
+    return region.size() >= 3 && (region[0] == L'L' || region[0] == L'l') && region[1] == L'5' &&
+           (region[2] == L'R' || region[2] == L'r');
+}
+
 bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region) {
     Close();
-    game_ = IsMostWantedRegion(region) ? Game::MostWanted : Game::Underground2;
+    game_ = IsProStreetTracks(tracksDirectory) ? Game::ProStreet
+          : IsMostWantedRegion(region) ? Game::MostWanted
+          : IsCarbonRegion(region)     ? Game::Carbon
+                                       : Game::Underground2;
 
     // A region the editor made reads the files of the region it copies; its
     // edits keep its own name (nfs/CustomRegions.h).
@@ -139,15 +167,15 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
 
     // Visibility is optional: a region without it simply falls back to
     // drawing by distance, which is worse but not fatal.
-    preculler_.Parse(layout_.Span(), false, IsMostWanted());
+    preculler_.Parse(layout_.Span(), false, HasMostWantedLayout(), IsCarbon() || IsProStreet());
 
     // The edits live beside the game, not in it, so they are gathered here and
     // applied to each mesh as its section is parsed. That way the viewport and
     // the running game are looking at the same geometry.
     overlays_.clear();
     spans_.clear();
-    // Nothing is ever written for Most Wanted, so there are no edits to read back.
-    if (!overlayFolder_.empty() && !IsMostWanted()) {
+    // Nothing is ever written for Most Wanted or Carbon, so there are no edits to read back.
+    if (!overlayFolder_.empty() && !HasMostWantedLayout()) {
         const size_t loaded = ReadMeshOverlays(overlayFolder_, region, overlays_);
         if (loaded) LOG_INFO("%zu edited meshes loaded from the models folder", loaded);
 
@@ -162,7 +190,7 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
     // visibility their zones, beside everything the shipped file has at the
     // same offsets.
     std::vector<u8> served;
-    if (!overlayFolder_.empty() && !IsMostWanted() &&
+    if (!overlayFolder_.empty() && !HasMostWantedLayout() &&
         ::GetFileAttributesW((overlayFolder_ + L"\\imports-" + region + L".txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
         FileMap copy;
         if (copy.Open(overlayFolder_ + L"\\files\\TRACKS\\" + region + L".BUN")) {
@@ -203,10 +231,11 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
     // (io/RegionCreate.h, ApplyEmptyRegionLists).
     // Most Wanted's moving objects are EAGL4 animations (0x00E34010), not
     // read yet.
-    if (!emptyCity_ && !IsMostWanted()) objectAnimations_.Parse(layout_.Span());
-    if (IsMostWanted())
-        LOG_INFO("Most Wanted region %S: %zu sections, %zu visibility zones (read-only)", region.c_str(),
-                 table_.Sections().size(), preculler_.ZoneCount());
+    if (!emptyCity_ && !HasMostWantedLayout()) objectAnimations_.Parse(layout_.Span());
+    if (HasMostWantedLayout())
+        LOG_INFO("%s region %S: %zu sections, %zu visibility zones (read-only)",
+                 IsProStreet() ? "ProStreet" : IsCarbon() ? "Carbon" : "Most Wanted", region.c_str(), table_.Sections().size(),
+                 preculler_.ZoneCount());
 
     region_ = region;
     sectionToLoaded_.assign(table_.Sections().size(), -1);

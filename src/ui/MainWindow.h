@@ -51,6 +51,7 @@ private:
     friend struct MarkersAccess;
     friend struct U1LibraryAccess;
     friend struct MWLibraryAccess;
+    friend struct PSLibraryAccess;
 
     static LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT Handle(UINT message, WPARAM wParam, LPARAM lParam);

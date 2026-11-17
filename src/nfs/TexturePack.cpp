@@ -38,6 +38,30 @@ constexpr size_t kTexAlphaBlend    = 0x56;
 constexpr size_t kFormatEntrySize = 32;
 constexpr size_t kFormatFourCc    = 0x14;
 
+// --- Version 8 (Carbon; ProStreet's too) ------------------------------------
+// A texture header is 0x58 bytes, then u8 the name's length (with its NUL,
+// padded so the record ends on four bytes) and the name. Hash 0x0C, offset of
+// the pixels 0x14, of the palette 0x18 (-1: none), size 0x1C, palette size
+// 0x20, mip 0's size 0x24, width and height 0x28/0x2A, mips 0x32, scroll type
+// 0x36, alpha usage and blend 0x39/0x3A, scroll step and speeds 0x3E..0x43.
+// The format entries are 0x18 bytes with the FourCC at 0x0C.
+constexpr size_t kV8Fixed       = 0x58;
+constexpr size_t kV8Hash        = 0x0C;
+constexpr size_t kV8DataOffset  = 0x14;
+constexpr size_t kV8PaletteOff  = 0x18;
+constexpr size_t kV8DataSize    = 0x1C;
+constexpr size_t kV8PaletteSize = 0x20;
+constexpr size_t kV8BaseSize    = 0x24;
+constexpr size_t kV8Width       = 0x28;
+constexpr size_t kV8Height      = 0x2A;
+constexpr size_t kV8MipCount    = 0x32;
+constexpr size_t kV8ScrollType  = 0x36;
+constexpr size_t kV8AlphaUsage  = 0x39;
+constexpr size_t kV8AlphaBlend  = 0x3A;
+constexpr size_t kV8ScrollStep  = 0x3E;
+constexpr size_t kV8FormatEntry = 0x18;
+constexpr size_t kV8FormatFourCc = 0x0C;
+
 TextureFormat FormatFromFourCc(u32 fourCc) {
     switch (fourCc) {
         case 0x31545844: return TextureFormat::Dxt1;  // "DXT1"
@@ -115,12 +139,50 @@ bool TexturePack::ParseCompressed(const Chunk& packChunk, ByteSpan index) {
     return !textures_.empty();
 }
 
+bool TexturePack::ParseVersion8(ByteSpan headers, ByteSpan formats, ByteSpan pixels) {
+    size_t at = 0, failed = 0;
+    for (size_t i = 0; at + kV8Fixed + 1 <= headers.size; ++i) {
+        const ByteSpan entry = headers.sub(at, headers.size - at);
+        const size_t nameLength = entry.read<u8>(kV8Fixed);
+        at += kV8Fixed + 1 + nameLength;
+        Texture texture;
+        texture.name          = ReadFixedName(entry, kV8Fixed + 1, nameLength);
+        texture.hash          = entry.read<u32>(kV8Hash);
+        texture.width         = entry.read<u16>(kV8Width);
+        texture.height        = entry.read<u16>(kV8Height);
+        texture.mipCount      = std::max<u8>(entry.read<u8>(kV8MipCount), 1);
+        texture.baseLevelSize = entry.read<u32>(kV8BaseSize);
+        texture.alphaUsage    = (AlphaUsage)std::min<u8>(entry.read<u8>(kV8AlphaUsage), 2);
+        texture.alphaBlend    = (AlphaBlend)std::min<u8>(entry.read<u8>(kV8AlphaBlend), 2);
+        if ((i + 1) * kV8FormatEntry <= formats.size)
+            texture.format = FormatFromFourCc(formats.read<u32>(i * kV8FormatEntry + kV8FormatFourCc));
+        texture.scrollType = entry.read<u8>(kV8ScrollType);
+        texture.scrollStep = entry.read<i16>(kV8ScrollStep) / 256.0f;
+        texture.scrollS    = entry.read<i16>(kV8ScrollStep + 2) / 256.0f;
+        texture.scrollT    = entry.read<i16>(kV8ScrollStep + 4) / 256.0f;
+        if (texture.scrollType > 2 || (texture.scrollS == 0.0f && texture.scrollT == 0.0f)) texture.scrollType = 0;
+        if (!(texture.scrollStep > 0.0f)) texture.scrollStep = 1.0f;
+
+        const u32 offset = entry.read<u32>(kV8DataOffset), size = entry.read<u32>(kV8DataSize);
+        if ((u64)offset + size > pixels.size || texture.format == TextureFormat::Unknown) { ++failed; continue; }
+        texture.pixels = pixels.sub(offset, size);
+        const u32 paletteOffset = entry.read<u32>(kV8PaletteOff), paletteSize = entry.read<u32>(kV8PaletteSize);
+        if (paletteSize && paletteOffset != 0xFFFFFFFFu && (u64)paletteOffset + paletteSize <= pixels.size)
+            texture.palette = pixels.sub(paletteOffset, paletteSize);
+        byHash_.emplace(texture.hash, textures_.size());
+        textures_.push_back(std::move(texture));
+    }
+    LOG_INFO("texture pack '%s' (version 8): %zu textures, %zu unreadable", name_.c_str(), textures_.size(), failed);
+    return !textures_.empty();
+}
+
 bool TexturePack::Parse(const Chunk& packChunk) {
     textures_.clear();
     byHash_.clear();
     owned_.clear();
 
     ByteSpan headers, formats, pixels, compressed;
+    u32 version = 0;
 
     ChunkReader top = ChunkReader::Children(packChunk);
     Chunk block;
@@ -131,7 +193,8 @@ bool TexturePack::Parse(const Chunk& packChunk) {
             while (info.Next(part)) {
                 switch (part.id) {
                     case kChunkTpkHeader:
-                        name_ = ReadFixedName(part.data, 0x0C, 28);
+                        version = part.data.read<u32>(0);
+                        name_ = ReadFixedName(part.data, version == 8 ? 0x04 : 0x0C, 28);
                         break;
                     case kChunkTpkTextureHeaders: headers = part.data; break;
                     case kChunkTpkFormatTable:    formats = part.data; break;
@@ -149,6 +212,7 @@ bool TexturePack::Parse(const Chunk& packChunk) {
     }
 
     if (headers.empty() && !compressed.empty()) return ParseCompressed(packChunk, compressed);
+    if (version == 8 && !headers.empty() && !pixels.empty()) return ParseVersion8(headers, formats, pixels);
     if (headers.empty() || pixels.empty()) {
         LOG_WARN("texture pack '%s' is missing headers or pixel data", name_.c_str());
         return false;

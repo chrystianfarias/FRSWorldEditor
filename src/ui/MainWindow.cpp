@@ -33,6 +33,7 @@
 #include "ui/RoadsExtension.h"
 #include "ui/U1Library.h"
 #include "ui/MWLibrary.h"
+#include "ui/PSLibrary.h"
 #include "ui/SetupWizard.h"
 #include "ui/WorldDialogs.h"
 
@@ -692,6 +693,8 @@ void MainWindow::OnCreate() {
     extensions_.push_back(CreateU1Library(*this));
     // And Need for Speed Most Wanted's (ui/MWLibrary.h).
     extensions_.push_back(CreateMWLibrary(*this));
+    // And Need for Speed ProStreet's (ui/PSLibrary.h).
+    extensions_.push_back(CreatePSLibrary(*this));
     // The mesh editor (ui/MeshTools.h), asked before the collision tools so
     // that while it edits, Ctrl+Z steps its own edit back.
     {
@@ -1477,8 +1480,8 @@ void MainWindow::UpdateTitle() {
         title += L" - " + world_->Region();
         if (world_->IsUnderground1())
             title += L" (Underground, track " + std::to_wstring(world_->TrackNumber()) + L", read-only)";
-        else if (world_->IsMostWanted())
-            title += L" (Most Wanted, read-only)";
+        else if (world_->IsReadOnly())
+            title += std::wstring(L" (") + world_->GameLabel() + L", read-only)";
     }
     if (!gameFolder_.empty()) title += L" [" + worldName_ + L"]";
     ::SetWindowTextW(window_, title.c_str());

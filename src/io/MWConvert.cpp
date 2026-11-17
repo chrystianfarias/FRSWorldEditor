@@ -60,19 +60,22 @@ private:
 
 } // namespace
 
-bool ConvertMWObject(ByteSpan object, u64 fileOffset, std::vector<u8>& out, std::wstring& error) {
+bool ConvertMWObject(ByteSpan object, u64 fileOffset, std::vector<u8>& out, std::wstring& error, nfs::Game game) {
     out.clear();
     nfs::ChunkReader reader(object, fileOffset);
     nfs::Chunk chunk;
     if (!reader.Next(chunk) || chunk.id != kObject) { error = L"That is not a model chunk."; return false; }
 
     nfs::SolidObject model;
-    if (!nfs::ParseSolidObject(chunk, model, nfs::Game::MostWanted)) {
-        error = L"The model could not be read as Most Wanted's.";
+    const std::wstring gameName = game == nfs::Game::ProStreet ? L"ProStreet"
+                                : game == nfs::Game::Carbon    ? L"Carbon"
+                                                               : L"Most Wanted";
+    if (!nfs::ParseSolidObject(chunk, model, game)) {
+        error = L"The model could not be read as " + gameName + L"'s.";
         return false;
     }
     const ByteSpan source = nfs::FindChunk(chunk, kHeader).data;
-    if (source.size < kHeaderMW) { error = L"The model's header is not Most Wanted's."; return false; }
+    if (source.size < kHeaderMW) { error = L"The model's header is not " + gameName + L"'s."; return false; }
 
     // Only the textures the materials draw with, in the order first used.
     std::vector<u32> textures;
@@ -165,10 +168,15 @@ bool SameVertex(const nfs::SolidVertex& a, const nfs::SolidVertex& b) {
 
 } // namespace
 
-int RunMWSelfTest(const std::wstring& folder) {
+int RunMWSelfTest(const std::wstring& folder, nfs::Game game, const std::wstring& regionName) {
     nfs::World world;
-    if (!world.Open(folder + L"\\TRACKS", L"L2RA") || !world.IsMostWanted()) {
-        LOG_ERROR("MW self-test: no Most Wanted L2RA in %S", folder.c_str());
+    const std::wstring regionText = !regionName.empty()          ? regionName
+                                  : game == nfs::Game::ProStreet ? L"L6R_Ebisu"
+                                  : game == nfs::Game::Carbon    ? L"L5RA"
+                                                                 : L"L2RA";
+    const wchar_t* region = regionText.c_str();
+    if (!world.Open(folder + L"\\TRACKS", region) || world.GameKind() != game) {
+        LOG_ERROR("MW self-test: no %S in %S", region, folder.c_str());
         return 2;
     }
     world.LoadAllSections();
@@ -187,13 +195,13 @@ int RunMWSelfTest(const std::wstring& folder) {
                 if (object.id != kObject) continue;
                 const ByteSpan whole{ object.raw.data - 8, object.raw.size + 8 };
                 nfs::SolidObject original;
-                if (!nfs::ParseSolidObject(object, original, nfs::Game::MostWanted)) { ++unreadable; continue; }
+                if (!nfs::ParseSolidObject(object, original, game)) { ++unreadable; continue; }
                 if (!seen.insert(original.hash).second) continue;
                 ++models;
 
                 std::vector<u8> converted;
                 std::wstring error;
-                if (!ConvertMWObject(whole, object.headerOffset, converted, error)) {
+                if (!ConvertMWObject(whole, object.headerOffset, converted, error, game)) {
                     if (bad++ < 30) LOG_WARN("MW self-test %s: %S", original.name.c_str(), error.c_str());
                     continue;
                 }
@@ -240,8 +248,8 @@ int RunMWSelfTest(const std::wstring& folder) {
                      texture->height, nfs::ToString(texture->format));
     }
 
-    LOG_INFO("MW self-test: %zu models, %zu converted and read back the same, %zu failed, %zu unreadable as MW; "
+    LOG_INFO("%S self-test: %zu models, %zu converted and read back the same, %zu failed, %zu unreadable as MW; "
              "textures: %zu copied, %zu failed, %zu not in the region's or the global packs",
-             models, good, bad, unreadable, copied, failed, missing);
+             region, models, good, bad, unreadable, copied, failed, missing);
     return bad == 0 && failed == 0 ? 0 : 1;
 }

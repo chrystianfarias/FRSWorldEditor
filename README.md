@@ -34,7 +34,8 @@ If the editor helps you, you can [buy me a coffee](https://buymeacoffee.com/chry
 
 | Feature | Underground | Underground 2 | Most Wanted | Carbon | ProStreet |
 | --- | :---: | :---: | :---: | :---: | :---: |
-| View the world as shipped (geometry, textures, scenery, lighting) | 🚧 | ✅ | 🗓️ | 🗓️ | 🗓️ |
+| View the world as shipped (geometry, textures, scenery, lighting) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Its models in the Library, to place in Underground 2 | ✅ | — | ✅ | ✅ | ✅ |
 | Sky, animated textures, object animations | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
 | Place, move, copy and remove objects | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
 | Mesh editor and OBJ export / import | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
@@ -51,6 +52,12 @@ If the editor helps you, you can [buy me a coffee](https://buymeacoffee.com/chry
 
 Underground and ProStreet have no free roam: in those games the editor will
 launch into a race instead.
+
+Underground (Olympic City), Most Wanted (Rockport), Carbon (Palmont City) and
+ProStreet (every track) open read-only for now: to look around and export
+from. Their models are already in Underground 2's Library -- pick the game in
+its Game filter -- and are converted to Underground 2's format when the world
+is saved.
 
 ## What it does (Underground 2)
 
