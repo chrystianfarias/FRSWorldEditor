@@ -31,6 +31,19 @@ constexpr size_t kOffHash         = 0x30;
 constexpr u32    kChunkSectionTableU1  = 0x00034107;
 constexpr size_t kSectionEntrySizeU1   = 56;
 
+// NFS World's section table: 208-byte entries. The file name is chosen by the
+// game from +0x1C: zero means STREAM<region>_<number>.BUN, otherwise
+// STREAM<region>_0x<hash>.BUN. The size at +0x60 is the file length for A..G
+// positioned sections; library files (U..Y) keep a sub-stream size there.
+constexpr size_t kNfswEntrySize   = 208;
+constexpr size_t kNfswOffNumber   = 0x08;
+constexpr size_t kNfswOffHash     = 0x18;
+constexpr size_t kNfswOffStream   = 0x1C;
+constexpr size_t kNfswOffUid      = 0x24;
+constexpr size_t kNfswOffPosition = 0x28;
+constexpr size_t kNfswOffFileSize = 0x60;
+constexpr size_t kNfswOffBufSize  = 0x68;
+
 std::string DecodeName(u32 packed) {
     char text[5] = {};
     for (int i = 0; i < 4; ++i) {
@@ -121,6 +134,73 @@ bool SectionTable::Parse(ByteSpan bunFile) {
     }
 
     LOG_INFO("section table: %zu sections", sections_.size());
+    return !sections_.empty();
+}
+
+bool SectionTable::ParseNfsw(ByteSpan bunFile) {
+    sections_.clear();
+
+    ChunkReader reader(bunFile, 0);
+    Chunk chunk;
+    ByteSpan table;
+    u64 chunkDataOffset = 0;
+    while (reader.Next(chunk)) {
+        if (chunk.id == kChunkSectionTable) {
+            table = chunk.data;
+            chunkDataOffset = chunk.dataOffset;
+            break;
+        }
+    }
+
+    if (table.empty()) {
+        LOG_ERROR("NFS World section table (chunk %08X) not found", (unsigned)kChunkSectionTable);
+        return false;
+    }
+
+    const size_t count = table.size / kNfswEntrySize;
+    sections_.reserve(count);
+    size_t positioned = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const ByteSpan entry = table.sub(i * kNfswEntrySize, kNfswEntrySize);
+
+        Section section;
+        section.tableEntryOffset = chunkDataOffset + i * kNfswEntrySize;
+        section.id           = entry.read<u32>(0);
+        section.name         = DecodeName(section.id);
+        section.number       = entry.read<u32>(kNfswOffNumber);
+        section.hash         = entry.read<u32>(kNfswOffHash);
+        section.streamHash   = entry.read<u32>(kNfswOffStream);
+        section.uid          = entry.read<u32>(kNfswOffUid);
+        section.position     = { entry.read<float>(kNfswOffPosition),
+                                 entry.read<float>(kNfswOffPosition + 4),
+                                 entry.read<float>(kNfswOffPosition + 8) };
+        section.fileSize     = entry.read<u32>(kNfswOffFileSize);
+        section.bufferSize   = entry.read<u32>(kNfswOffBufSize);
+
+        // A section file is read whole; streamOffset is zero because the file
+        // starts at its own first chunk.
+        section.streamOffset = 0;
+        section.streamSize   = section.fileSize;
+        section.originalStreamOffset = section.streamOffset;
+        section.originalStreamSize   = section.streamSize;
+        section.originalOtherSize    = section.fileSize;
+        if (section.position.x != 0.0f || section.position.y != 0.0f) ++positioned;
+
+        sections_.push_back(std::move(section));
+    }
+
+    // NFS World ships 137 pairs of positioned sections at the same centre,
+    // numbered 400 apart (A31/A431, A100/A500, ...). They are not alternate
+    // LODs: the two records hold different instance placements (A431 carries
+    // the refinery towers that A31 only lights). The game draws both, so every
+    // section keeps order 0; BuildInstances still drops exact duplicate
+    // placements if a pair ever does repeat one.
+
+    size_t alternates = 0;
+    for (const Section& section : sections_)
+        if (section.IsAlternate()) ++alternates;
+    LOG_INFO("NFS World section table: %zu sections (%zu positioned, %zu library, %zu alternate)",
+             sections_.size(), positioned, sections_.size() - positioned, alternates);
     return !sections_.empty();
 }
 

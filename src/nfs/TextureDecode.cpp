@@ -124,6 +124,48 @@ bool DecodePalettised(const u8* source, size_t available, ByteSpan palette,
     return true;
 }
 
+// One BC4 block is eight bytes: two endpoints and sixteen three-bit indices.
+void DecodeBc4Block(const u8* block, u8 values[16]) {
+    const u32 a0 = block[0], a1 = block[1];
+    u32 ramp[8] = { a0, a1 };
+    if (a0 > a1) {
+        for (u32 i = 1; i < 7; ++i)
+            ramp[i + 1] = ((7 - i) * a0 + i * a1) / 7;
+    } else {
+        for (u32 i = 1; i < 5; ++i)
+            ramp[i + 1] = ((5 - i) * a0 + i * a1) / 5;
+        ramp[6] = 0;
+        ramp[7] = 255;
+    }
+    u64 bits = 0;
+    for (int i = 0; i < 6; ++i) bits |= (u64)block[2 + i] << (8 * i);
+    for (u32 i = 0; i < 16; ++i) values[i] = (u8)ramp[(bits >> (3 * i)) & 7];
+}
+
+bool DecodeBc(const u8* source, size_t available, TextureFormat format,
+              u32 width, u32 height, std::vector<u32>& out) {
+    const bool bc5 = format == TextureFormat::Bc5;
+    const u32 blockBytes = bc5 ? 16u : 8u;
+    const u32 blocksX = std::max(1u, (width + 3) / 4);
+    const u32 blocksY = std::max(1u, (height + 3) / 4);
+    if (available < (size_t)blocksX * blocksY * blockBytes) return false;
+
+    for (u32 by = 0; by < blocksY; ++by) {
+        for (u32 bx = 0; bx < blocksX; ++bx) {
+            const u8* block = source + ((size_t)by * blocksX + bx) * blockBytes;
+            u8 red[16], green[16];
+            DecodeBc4Block(block, red);
+            if (bc5) DecodeBc4Block(block + 8, green);
+            u32 colours[16];
+            for (u32 i = 0; i < 16; ++i)
+                colours[i] = bc5 ? Bgra(0, green[i], red[i], 255)
+                                 : Bgra(red[i], red[i], red[i], 255);
+            StoreBlock(out, width, height, bx * 4, by * 4, colours);
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 u32 TextureLevelSize(const Texture& texture, u32 level) {
@@ -136,9 +178,11 @@ u32 TextureLevelSize(const Texture& texture, u32 level) {
         case TextureFormat::Argb8888:
             return width * height * 4;
         case TextureFormat::Dxt1:
+        case TextureFormat::Bc4:
             return std::max(1u, (width + 3) / 4) * std::max(1u, (height + 3) / 4) * 8;
         case TextureFormat::Dxt3:
         case TextureFormat::Dxt5:
+        case TextureFormat::Bc5:
             return std::max(1u, (width + 3) / 4) * std::max(1u, (height + 3) / 4) * 16;
         default:
             return 0;
@@ -173,6 +217,8 @@ bool DecodeTexture(const Texture& texture, u32 level,
     if (texture.format == TextureFormat::Palettised8)
         return DecodePalettised(source, available, texture.palette,
                                 outWidth, outHeight, outPixels);
+    if (texture.format == TextureFormat::Bc4 || texture.format == TextureFormat::Bc5)
+        return DecodeBc(source, available, texture.format, outWidth, outHeight, outPixels);
 
     return DecodeDxt(source, available, texture.format, outWidth, outHeight, outPixels);
 }

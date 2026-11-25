@@ -1,5 +1,7 @@
 #include "nfs/SolidList.h"
 
+#include "nfs/ByteRead.h"
+
 #include "core/Log.h"
 
 #include <cstring>
@@ -43,28 +45,6 @@ constexpr u32 kStridePositionColorUv       = 24;  // pos, color, uv
 constexpr u32 kStridePositionNormalColorUv = 36;  // pos, normal, color, uv
 // Underground 1's crowd: the 36-byte layout, then bone weights and indices.
 constexpr u32 kStrideSkinned               = 60;
-
-Vec3 ReadVec3(ByteSpan span, size_t offset) {
-    return { span.read<float>(offset),
-             span.read<float>(offset + 4),
-             span.read<float>(offset + 8) };
-}
-
-Mat4 ReadMat4(ByteSpan span, size_t offset) {
-    Mat4 m;
-    for (int row = 0; row < 4; ++row)
-        for (int col = 0; col < 4; ++col)
-            m.m[row][col] = span.read<float>(offset + (size_t)(row * 4 + col) * 4);
-    return m;
-}
-
-std::string ReadName(ByteSpan span, size_t offset) {
-    if (offset >= span.size) return {};
-    const char* text = (const char*)span.data + offset;
-    const size_t available = span.size - offset;
-    const size_t length = ::strnlen(text, available);
-    return std::string(text, length);
-}
 
 void ParseHeader(ByteSpan data, SolidObject& out) {
     out.version    = data.read<u32>(kHdrVersion);
@@ -157,10 +137,37 @@ void ParseIndices(ByteSpan data, u32 triangleCount, SolidObject& out) {
 
 } // namespace
 
-ObjectKind ClassifyObject(const std::string& name) {
+ObjectKind ClassifyObject(const std::string& name, bool nfsw) {
+    // Shared names: the UG2 sets use these too and they keep their meaning.
     if (name.rfind("PAN_", 0) == 0)    return ObjectKind::Backdrop;  // panorama pieces
     if (name.rfind("SKYDOME", 0) == 0) return ObjectKind::Backdrop;
     if (name.rfind("TRN_", 0) == 0)    return ObjectKind::Terrain;
+
+    // The NFS World families are its own: classify them only when its parser
+    // is running, so a UG2/UG1 model that happens to share a prefix keeps the
+    // old kind. The handover workspace's docs/VISIBILITY.md records the evidence.
+    if (nfsw) {
+        if (name.rfind("PANO_", 0) == 0) return ObjectKind::Backdrop;  // PANO_TUNER
+        // CU_*ISLAND* are the huge, low-detail island shells at the horizon;
+        // CU_ also names real props (lights, tunnels, refinery), so this is
+        // deliberately narrower than the prefix.
+        if (name.rfind("CU_", 0) == 0 && name.find("ISLAND") != std::string::npos)
+            return ObjectKind::Backdrop;
+        // The whole CU_SH* family is shadow/block-out geometry: CU_SHADOWGEO,
+        // CU_SHMU_SHADOWPROXY, CU_SHBLOCK, CU_SHEXRD_TERRAIN and CU_SHUNDERPARK.
+        // They are placed for shadow passes and overlap the visible terrain/props;
+        // drawing them puts a second shell over the real world. The engine-proxy
+        // diagnostic toggle can show them when needed.
+        if (name.rfind("CU_SH", 0) == 0) return ObjectKind::Shadow;
+        if (name.rfind("RD_", 0) == 0)   return ObjectKind::Terrain;   // World roads
+        if (name.rfind("TN_", 0) == 0)   return ObjectKind::Terrain;   // named grounds (Venice)
+        // The engine keeps shadow and reflection proxies next to the real meshes;
+        // they are not part of the world's visible geometry.
+        if (name.rfind("SHD_", 0) == 0 || name.rfind("SHDW_", 0) == 0 ||
+            name.rfind("RFL_", 0) == 0 || name.rfind("REFL_", 0) == 0 ||
+            name.rfind("REF_", 0) == 0 || name.rfind("SHADOW", 0) == 0)
+            return ObjectKind::Shadow;
+    }
     return ObjectKind::Prop;
 }
 

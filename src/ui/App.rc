@@ -17,6 +17,7 @@ BEGIN
         MENUITEM "&Save World\tCtrl+S",           ID_WORLD_SAVE
         MENUITEM "Save World &As...",              ID_WORLD_SAVE_AS
         MENUITEM "&Publish World for Players...",  ID_WORLD_PUBLISH
+        MENUITEM "Import World &Attributes...",    ID_FILE_WORLD_ATTRIBUTES
         MENUITEM SEPARATOR
         MENUITEM "&Game Folder and Plugins...\tCtrl+O", ID_FILE_OPEN_GAME
         MENUITEM "Choose &Blender...",             ID_FILE_BLENDER
@@ -29,6 +30,19 @@ BEGIN
     BEGIN
         MENUITEM "&Load All Sections\tCtrl+L",    ID_WORLD_LOAD_ALL
         MENUITEM "Refresh Region &Edits",          ID_FILE_EDITS
+        MENUITEM SEPARATOR
+        POPUP "Scenery &Groups"
+        BEGIN
+            MENUITEM "&Normal",                     ID_WORLD_HOLIDAY_NORMAL
+            MENUITEM "&Halloween",                  ID_WORLD_HOLIDAY_HALLOWEEN
+            MENUITEM "&Oktoberfest",                ID_WORLD_HOLIDAY_OKTOBERFEST
+            MENUITEM "&Christmas",                  ID_WORLD_HOLIDAY_CHRISTMAS
+            MENUITEM "&Valentines",                 ID_WORLD_HOLIDAY_VALENTINES
+            MENUITEM "&New Years",                  ID_WORLD_HOLIDAY_NEWYEARS
+            MENUITEM "Top &Gear",                   ID_WORLD_HOLIDAY_TOPGEAR
+            MENUITEM SEPARATOR
+            MENUITEM "&All (diagnostic)",           ID_WORLD_HOLIDAY_ALL
+        END
     END
 
     POPUP "&View"
@@ -36,13 +50,16 @@ BEGIN
         POPUP "&Render Mode"
         BEGIN
             MENUITEM "&Textured\tF1",             ID_VIEW_TEXTURED
-            MENUITEM "&Unlit\tF2",                ID_VIEW_UNLIT
+            MENUITEM "&Unlit",                ID_VIEW_UNLIT
             MENUITEM "&Vertex Colours\tF3",       ID_VIEW_VERTEX_COLOR
             MENUITEM "&Wireframe\tF4",            ID_VIEW_WIREFRAME
         END
         POPUP "&Show"
         BEGIN
+            MENUITEM "Game &Standard View",       ID_VIEW_GAME_STANDARD
+            MENUITEM "Show &engine proxies (diagnostic)", ID_VIEW_PROXIES
             MENUITEM "&Scenery\tF7",              ID_VIEW_SCENERY
+            MENUITEM "Race &Barriers",            ID_VIEW_RACE_PROPS
             MENUITEM "Model &Library\tF10",       ID_VIEW_LIBRARY
             MENUITEM "&Alternate Sections\tF11",  ID_VIEW_ALTERNATE
             MENUITEM "&Backdrop\tF5",             ID_VIEW_BACKDROP
@@ -51,7 +68,7 @@ BEGIN
         POPUP "&Drawing"
         BEGIN
             MENUITEM "&Frustum Culling",          ID_VIEW_FRUSTUM_CULL
-            MENUITEM "&Stream Around Camera",     ID_VIEW_STREAMING
+            MENUITEM "&Stream Visibility",        ID_VIEW_STREAMING
             MENUITEM "&Backface Culling\tF6",     ID_VIEW_BACKFACE_CULL
         END
         // MINIMAP PREVIEW (temporary)
@@ -270,7 +287,6 @@ BEGIN
     VK_DELETE,  ID_OBJECT_DELETE,    VIRTKEY
     VK_HOME,    ID_WORLD_FRAME,      VIRTKEY
     VK_F1,      ID_VIEW_TEXTURED,    VIRTKEY
-    VK_F2,      ID_VIEW_UNLIT,       VIRTKEY
     VK_F3,      ID_VIEW_VERTEX_COLOR,VIRTKEY
     VK_F4,      ID_VIEW_WIREFRAME,   VIRTKEY
     VK_F5,      ID_VIEW_BACKDROP,    VIRTKEY
@@ -284,7 +300,7 @@ END
 // ---------------------------------------------------------------------------
 // The setup wizard (ui/SetupWizard.cpp)
 
-IDD_SETUP_FOLDER DIALOGEX 0, 0, 300, 170
+IDD_SETUP_FOLDER DIALOGEX 0, 0, 300, 214
 STYLE DS_SETFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
 FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
@@ -302,8 +318,12 @@ BEGIN
     EDITTEXT        IDC_SETUP_MW_PATH, 0, 122, 236, 14, ES_AUTOHSCROLL
     PUSHBUTTON      "Browse...", IDC_SETUP_MW_BROWSE, 242, 121, 58, 16
     LTEXT           "", IDC_SETUP_MW_STATUS, 0, 138, 300, 10
-    LTEXT           "&Edit the worlds of:", -1, 0, 156, 70, 10
-    COMBOBOX        IDC_SETUP_MAIN, 72, 154, 228, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Need for Speed: &World", -1, 0, 153, 236, 10
+    EDITTEXT        IDC_SETUP_WORLD_PATH, 0, 164, 236, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_SETUP_WORLD_BROWSE, 242, 163, 58, 16
+    LTEXT           "", IDC_SETUP_WORLD_STATUS, 0, 180, 300, 10
+    LTEXT           "&Edit the worlds of:", -1, 0, 198, 70, 10
+    COMBOBOX        IDC_SETUP_MAIN, 72, 196, 228, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 END
 
 IDD_SETUP_PARTS DIALOGEX 0, 0, 300, 170

@@ -1,5 +1,8 @@
 #include "render/CollisionMesh.h"
 
+#include "nfs/NfswCollision.h"
+
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -14,12 +17,17 @@ struct CollisionVertex {
 // Collision lies almost exactly on the road surface. Lifting it a hair keeps
 // it from z-fighting with the render mesh without visibly floating.
 constexpr float kLift = 0.05f;
+// World keeps its static wall polygons in Z0; a single draw can exceed the
+// primitive limit on Direct3D 9 devices.
+constexpr u32 kPrimitivesPerDraw = 65535;
 
 constexpr D3DCOLOR kBarrierColour   = 0x90FF3030;
 constexpr D3DCOLOR kRaceColour      = 0x80FF9A20;   // a race barrier group: absent in free roam
 constexpr D3DCOLOR kGroundOutline   = 0xFF101010;
 constexpr D3DCOLOR kBarrierOutline  = 0xFFFFD040;
 constexpr D3DCOLOR kVerticalOutline = 0xFFFF8040;
+constexpr D3DCOLOR kTallWallOutline = 0xFFD79B69;
+constexpr D3DCOLOR kSmackableOutline = 0xFF69DFF2;
 constexpr D3DCOLOR kRaceOutline     = 0xFFFFE080;
 
 D3DCOLOR Scale(u32 rgb, float shade, u32 alpha) {
@@ -62,8 +70,28 @@ u32 CollisionMesh::SurfaceRgb(u8 surface) {
 
 namespace {
 
-void Push(std::vector<CollisionVertex>& out, const Vec3& p, D3DCOLOR colour) {
-    out.push_back({ p.x, p.y, p.z + kLift, colour });
+void Push(std::vector<CollisionVertex>& out, const Vec3& p, D3DCOLOR colour, float lift = kLift) {
+    out.push_back({ p.x, p.y, p.z + lift, colour });
+}
+
+bool SamePoint(const Vec3& a, const Vec3& b) {
+    return a.x == b.x && a.y == b.y && a.z == b.z;
+}
+
+bool IsInternalStripEdge(const nfs::CollisionPolygon& polygon,
+                         const nfs::CollisionPolygon& neighbour, const Vec3& normal,
+                         const Vec3& a, const Vec3& b) {
+    if (neighbour.quad || neighbour.surface != polygon.surface ||
+        (polygon.nfswCollisionSource >> 16) != (neighbour.nfswCollisionSource >> 16)) return false;
+    const Vec3* p = neighbour.corners;
+    const Vec3 otherNormal = Normalize(Cross(p[1] - p[0], p[2] - p[0]));
+    if (std::abs(Dot(normal, otherNormal)) < 0.9996f) return false;
+    bool hasA = false, hasB = false;
+    for (int c = 0; c < 3; ++c) {
+        hasA |= SamePoint(a, p[c]);
+        hasB |= SamePoint(b, p[c]);
+    }
+    return hasA && hasB;
 }
 
 } // namespace
@@ -80,17 +108,21 @@ void CollisionMesh::Release() {
 }
 
 bool CollisionMesh::Upload(IDirect3DDevice9* device, const nfs::LoadedSection& section,
-                           bool showRaceGroups) {
+                           bool showRaceGroups, const nfs::CollisionPack* placed,
+                           const std::vector<nfs::NfswSmackableBox>* editedBoxes) {
     Release();
-    if (section.collision.empty()) return false;
+    const auto& boxes = editedBoxes ? *editedBoxes : section.smackableBoxes;
+    if (section.collision.empty() && boxes.empty() && !placed) return false;
+    sectionNumber_ = section.info ? section.info->number : 0;
 
     std::vector<CollisionVertex> surfaces, lines;
 
-    for (const nfs::CollisionPack& pack : section.collision) {
+    const auto uploadPack = [&](const nfs::CollisionPack& pack, bool preview) {
         sectionNumber_ = pack.sectionNumber;
         pack.ResolveBarriers();   // barrier heights, chain by chain
 
-        for (const nfs::CollisionPolygon& polygon : pack.polygons) {
+        for (size_t index = 0; index < pack.polygons.size(); ++index) {
+            const nfs::CollisionPolygon& polygon = pack.polygons[index];
             ++polygonCount_;
             const Vec3* p = polygon.corners;
             const bool race = polygon.raceGroup != 0;
@@ -116,25 +148,60 @@ bool CollisionMesh::Upload(IDirect3DDevice9* device, const nfs::LoadedSection& s
             const Vec3 normal = Normalize(Cross(p[1] - p[0], p[2] - p[0]));
             const Vec3 light  = Normalize(Vec3{ 0.4f, 0.3f, 1.0f });
             const float shade = 0.45f + 0.55f * std::fabs(Dot(normal, light));
+            const bool nativeStrip = polygon.nfswCollisionSource && !polygon.quad;
+            const bool tallBoundary = polygon.TallNfswBoundary();
+            // A World polygon carrying a native surface hash shows the two
+            // known ones in their usual colours, any other in violet.
+            const u32 rgb = !polygon.nfswSurface ? SurfaceRgb(polygon.surface)
+                          : polygon.nfswSurface == nfs::kRoadSurface ? SurfaceRgb(nfs::kSurfaceRoad)
+                          : polygon.nfswSurface == nfs::kSolidSurface ? SurfaceRgb(nfs::kSurfaceSolidWall)
+                          : 0xB478DC;
             const D3DCOLOR colour = race ? kRaceColour
-                                  : Scale(SurfaceRgb(polygon.surface), shade, polygon.Vertical() ? 0xC0 : 0xA0);
-            const D3DCOLOR outline = race ? kRaceOutline
+                                  : Scale(rgb, shade,
+                                          polygon.Vertical() ? 0xC0 : (nativeStrip ? 0x60 : 0xA0));
+            const D3DCOLOR outline = preview ? 0xFF89D58A
+                                   : race ? kRaceOutline
+                                   : tallBoundary ? kTallWallOutline
                                    : polygon.Vertical() ? kVerticalOutline : kGroundOutline;
 
-            for (int c : { 0, 1, 2 }) Push(surfaces, p[c], colour);
-            if (polygon.quad)
-                for (int c : { 0, 2, 3 }) Push(surfaces, p[c], colour);
+            // The stock bounds can span the whole map vertically. Their
+            // full-height wireframe leaves the road and smaller walls visible.
+            if (!tallBoundary) {
+                for (int c : { 0, 1, 2 }) Push(surfaces, p[c], colour);
+                if (polygon.quad)
+                    for (int c : { 0, 2, 3 }) Push(surfaces, p[c], colour);
+            }
 
             const int corners = polygon.quad ? 4 : 3;
             for (int c = 0; c < corners; ++c) {
-                Push(lines, p[c], outline);
-                Push(lines, p[(c + 1) % corners], outline);
                 bounds_.Add(p[c]);
+                const Vec3& a = p[c];
+                const Vec3& b = p[(c + 1) % corners];
+                if (nativeStrip &&
+                    ((index > 0 &&
+                      IsInternalStripEdge(polygon, pack.polygons[index - 1], normal, a, b)) ||
+                     (index + 1 < pack.polygons.size() &&
+                      IsInternalStripEdge(polygon, pack.polygons[index + 1], normal, a, b)))) continue;
+                Push(lines, a, outline);
+                Push(lines, b, outline);
+            }
+        }
+    };
+    for (const nfs::CollisionPack& pack : section.collision) uploadPack(pack, false);
+    if (placed) uploadPack(*placed, true);
+
+    for (const nfs::NfswSmackableBox& box : boxes) {
+        for (size_t corner = 0; corner < box.size(); ++corner) {
+            bounds_.Add(box[corner]);
+            for (size_t axis : { 1u, 2u, 4u }) {
+                if (corner & axis) continue;
+                Push(lines, box[corner], kSmackableOutline, 0.0f);
+                Push(lines, box[corner | axis], kSmackableOutline, 0.0f);
             }
         }
     }
 
-    if (surfaces.empty()) return false;
+    if (surfaces.empty() && lines.empty()) return false;
 
     surfaceTriangles_ = (u32)(surfaces.size() / 3);
     lineStart_        = (u32)surfaces.size();
@@ -159,11 +226,15 @@ bool CollisionMesh::Upload(IDirect3DDevice9* device, const nfs::LoadedSection& s
 void CollisionMesh::DrawSurfaces(IDirect3DDevice9* device) const {
     if (!buffer_ || !surfaceTriangles_) return;
     device->SetStreamSource(0, buffer_, 0, sizeof(CollisionVertex));
-    device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, surfaceTriangles_);
+    for (u32 first = 0; first < surfaceTriangles_; first += kPrimitivesPerDraw)
+        device->DrawPrimitive(D3DPT_TRIANGLELIST, first * 3,
+                              std::min(kPrimitivesPerDraw, surfaceTriangles_ - first));
 }
 
 void CollisionMesh::DrawOutlines(IDirect3DDevice9* device) const {
     if (!buffer_ || !lineCount_) return;
     device->SetStreamSource(0, buffer_, 0, sizeof(CollisionVertex));
-    device->DrawPrimitive(D3DPT_LINELIST, lineStart_, lineCount_);
+    for (u32 first = 0; first < lineCount_; first += kPrimitivesPerDraw)
+        device->DrawPrimitive(D3DPT_LINELIST, lineStart_ + first * 2,
+                              std::min(kPrimitivesPerDraw, lineCount_ - first));
 }

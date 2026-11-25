@@ -1,6 +1,7 @@
 #include "render/GpuResources.h"
 
 #include "core/Log.h"
+#include "nfs/TextureDecode.h"
 
 #include <algorithm>
 #include <cctype>
@@ -18,6 +19,8 @@ D3DFORMAT ToD3DFormat(nfs::TextureFormat format) {
         case nfs::TextureFormat::Dxt5:        return D3DFMT_DXT5;
         case nfs::TextureFormat::Palettised8: return D3DFMT_A8R8G8B8;
         case nfs::TextureFormat::Argb8888:    return D3DFMT_A8R8G8B8;
+        case nfs::TextureFormat::Bc4:
+        case nfs::TextureFormat::Bc5:         return D3DFMT_A8R8G8B8;
         default:                              return D3DFMT_UNKNOWN;
     }
 }
@@ -160,12 +163,15 @@ bool GpuSection::Upload(IDirect3DDevice9* device, const nfs::LoadedSection& sect
             gpuObject.transform   = object.transform;
             gpuObject.worldBounds = object.WorldBounds();
             gpuObject.isBackdrop  = object.IsBackdrop();
-            gpuObject.raceProp    = object.name.rfind("ZPM_", 0) == 0 ||
-                                    object.name.find("TRACKBARRIER") != std::string::npos;
+            std::string upper = object.name;
+            for (char& c : upper) c = (char)std::toupper((unsigned char)c);
+            // World's names are mixed case (XO_TrackBarrierPlayer), so match the
+            // race families after upper-casing; UG2's uppercase names still work.
+            gpuObject.raceProp    = upper.rfind("ZPM_", 0) == 0 ||
+                                    upper.find("TRACKBARRIER") != std::string::npos ||
+                                    upper.find("CRASHBARRIER") != std::string::npos;
             gpuObject.baseVertex  = vertexCursor;
             {
-                std::string upper = object.name;
-                for (char& c : upper) c = (char)std::toupper((unsigned char)c);
                 const bool pan = upper.rfind("PAN_", 0) == 0;
                 const bool farCopy = (upper.size() >= 2 && upper.compare(upper.size() - 2, 2, "_Z") == 0) ||
                                      upper.find("_Z_") != std::string::npos;
@@ -280,6 +286,29 @@ IDirect3DTexture9* TextureCache::Create(IDirect3DDevice9* device, const nfs::Tex
     if (palettised && texture.palette.size < 256 * 4) {
         LOG_WARN("texture '%s' is palettised but carries no palette", texture.name.c_str());
         return nullptr;
+    }
+
+    // ATI1/ATI2 are D3D10-era formats that D3D9 drivers handle inconsistently,
+    // so decode them on the CPU and upload plain BGRA.
+    if (texture.format == nfs::TextureFormat::Bc4 || texture.format == nfs::TextureFormat::Bc5) {
+        IDirect3DTexture9* decoded = nullptr;
+        const u32 levels = std::max<u32>(1, texture.mipCount);
+        if (FAILED(device->CreateTexture(texture.width, texture.height, levels, 0,
+                                         D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &decoded, nullptr)))
+            return nullptr;
+        const u32 uploadLevels = std::min<u32>(levels, decoded->GetLevelCount());
+        for (u32 level = 0; level < uploadLevels; ++level) {
+            std::vector<u32> pixels;
+            u32 width = 0, height = 0;
+            if (!nfs::DecodeTexture(texture, level, pixels, width, height)) break;
+            D3DLOCKED_RECT locked{};
+            if (FAILED(decoded->LockRect(level, &locked, nullptr, 0))) continue;
+            for (u32 row = 0; row < height; ++row)
+                std::memcpy((u8*)locked.pBits + (size_t)row * locked.Pitch,
+                            pixels.data() + (size_t)row * width, (size_t)width * 4);
+            decoded->UnlockRect(level);
+        }
+        return decoded;
     }
 
     IDirect3DTexture9* result = nullptr;

@@ -24,6 +24,9 @@ add_executable(FRSWorldEditor WIN32
     src/io/U1Convert.cpp
     src/io/ObjMesh.cpp
     src/io/PlacementWrite.cpp
+    src/io/NfswPlacementWrite.cpp
+    src/io/NfswAttributeOverlay.cpp
+    src/io/NfswSmackableWrite.cpp
     src/io/SectionRebuild.cpp
     src/io/SectionEdits.cpp
     src/io/SectionSplice.cpp
@@ -53,7 +56,11 @@ add_executable(FRSWorldEditor WIN32
     src/nfs/ModelCategory.cpp
     src/nfs/SceneryEdit.cpp
     src/nfs/SectionTable.cpp
+    src/nfs/NfswFormats.cpp
+    src/nfs/NfswCollision.cpp
+    src/nfs/NfswSmackableAttributes.cpp
     src/nfs/SolidList.cpp
+    src/nfs/StreamingModel.cpp
     src/nfs/TextureDecode.cpp
     src/nfs/TexturePack.cpp
     src/nfs/EaCompress.cpp
@@ -101,6 +108,8 @@ add_executable(FRSWorldEditor WIN32
     src/roads/Water.cpp
     src/roads/Prefabs.cpp
     src/roads/RoadBake.cpp
+    src/roads/NfswRoadBake.cpp
+    src/roads/NfswRoadTemplate.cpp
     src/roads/RoadRoutes.cpp
     src/nfs/Routes.cpp
     src/terrain/Terrain.cpp
@@ -212,3 +221,58 @@ set_source_files_properties(third_party/imgui/imgui.cpp third_party/imgui/imgui_
     third_party/imgui/imgui_tables.cpp third_party/imgui/imgui_widgets.cpp
     third_party/imgui/imgui_impl_dx9.cpp third_party/imgui/imgui_impl_win32.cpp
     PROPERTIES COMPILE_OPTIONS "/W0")
+
+# Headless format probe: reads the shipped NFS World files and exits without
+# creating a window. Kept out of the release package.
+add_executable(NfswProbe
+    tests/NfswProbe.cpp
+    src/roads/RoadNetwork.cpp
+    src/roads/NfswRoadBake.cpp
+    src/roads/NfswRoadTemplate.cpp
+    src/io/WorldFile.cpp
+    src/roads/CityZones.cpp
+    src/roads/Water.cpp
+    src/io/WorldProfiles.cpp
+    src/io/ObjMesh.cpp
+    src/io/SelectionImport.cpp
+    src/core/FileMap.cpp
+    src/core/Log.cpp
+    src/io/CollisionEdit.cpp
+    src/io/CollisionGenerate.cpp
+    src/io/MeshOverlay.cpp
+    src/io/ModelCopy.cpp
+    src/io/SectionEdits.cpp
+    src/io/SectionRebuild.cpp
+    src/io/SectionSplice.cpp
+    src/io/TextureImport.cpp
+    src/io/TpkBuild.cpp
+    src/nfs/ChunkReader.cpp
+    src/nfs/Collision.cpp
+    src/nfs/CustomRegions.cpp
+    src/nfs/EaCompress.cpp
+    src/nfs/Jdlz.cpp
+    src/nfs/ForeignModels.cpp
+    src/nfs/FreeRoam.cpp
+    src/nfs/NfswFormats.cpp
+    src/nfs/NfswCollision.cpp
+    src/nfs/NfswSmackableAttributes.cpp
+    src/nfs/Preculler.cpp
+    src/nfs/Scenery.cpp
+    src/nfs/SceneryEdit.cpp
+    src/nfs/SectionTable.cpp
+    src/nfs/SolidList.cpp
+    src/nfs/StreamingModel.cpp
+    src/nfs/TextureDecode.cpp
+    src/nfs/TexturePack.cpp
+    src/nfs/World.cpp
+    src/nfs/WorldAnimation.cpp
+    src/io/NfswPlacementWrite.cpp
+    src/io/NfswAttributeOverlay.cpp
+    src/io/NfswSmackableWrite.cpp
+)
+target_include_directories(NfswProbe PRIVATE src)
+target_link_libraries(NfswProbe PRIVATE windowscodecs ole32)
+target_compile_definitions(NfswProbe PRIVATE UNICODE _UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+if(MSVC)
+    target_compile_options(NfswProbe PRIVATE /utf-8)
+endif()

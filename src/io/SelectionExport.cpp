@@ -310,8 +310,8 @@ bool ExportSelection(const nfs::World& world,
         std::fprintf(manifest, "      \"placementsInSelection\": %zu,\n",
                      placementCount[model->hash]);
         std::fprintf(manifest,
-                     "      \"transform\": [%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, "
-                     "%.6f, %.6f, %.6f, %.6f, %.6f, %.6f]\n",
+                     "      \"transform\": [%.9g, %.9g, %.9g, %.9g, %.9g, %.9g, "
+                     "%.9g, %.9g, %.9g, %.9g, %.9g, %.9g]\n",
                      m.m[0][0], m.m[0][1], m.m[0][2],
                      m.m[1][0], m.m[1][1], m.m[1][2],
                      m.m[2][0], m.m[2][1], m.m[2][2],

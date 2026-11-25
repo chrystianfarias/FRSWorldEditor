@@ -26,6 +26,7 @@
 #include <commctrl.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <set>
 #include <cstring>
 #include <cwchar>

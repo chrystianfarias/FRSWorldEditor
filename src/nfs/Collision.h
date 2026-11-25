@@ -33,6 +33,12 @@ struct CollisionPolygon {
     // writes; the named fields above are read from them (SyncFromAttributes).
     // Byte 1 is recomputed on every encode.
     u8   attributes[4] = {};
+    u64  nfswCollisionSource = 0;   // original World PRAC face or boundary
+    // NFS World: the native surface hash this polygon writes into its 'ca'
+    // article. 0 keeps the static collision default: roads drive, walls are
+    // solid. Survives a save, since the hash trails the article.
+    u32  nfswSurface = 0;
+    static constexpr u64 kNfswBoundarySource = 0xFFFF0000;
 
     void SyncFromAttributes() {
         raceGroup = attributes[0];
@@ -41,6 +47,10 @@ struct CollisionPolygon {
     }
     // A wall with real height: flags 0x02 without the barrier's 0x04.
     bool Vertical() const { return !barrier && (flags & 0x02) != 0; }
+    bool TallNfswBoundary() const {
+        return (nfswCollisionSource & kNfswBoundarySource) == kNfswBoundarySource &&
+               std::abs(corners[1].z - corners[0].z) > 20.0f;
+    }
 };
 
 // The game's surface table (SPEED2.EXE 0x800EE0, 0x98 bytes an entry):

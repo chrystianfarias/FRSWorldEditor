@@ -1,5 +1,7 @@
 #include "nfs/SceneryEdit.h"
 
+#include "nfs/ByteRead.h"
+
 #include "nfs/ChunkReader.h"
 
 #include <algorithm>
@@ -94,10 +96,6 @@ void Put32(std::vector<u8>& out, size_t at, u32 v) { std::memcpy(out.data() + at
 void PutF(std::vector<u8>& out, size_t at, float v) { std::memcpy(out.data() + at, &v, 4); }
 void PutVec3(std::vector<u8>& out, size_t at, const Vec3& v) {
     PutF(out, at, v.x); PutF(out, at + 4, v.y); PutF(out, at + 8, v.z);
-}
-
-Vec3 ReadVec3(ByteSpan span, size_t at) {
-    return { span.read<float>(at), span.read<float>(at + 4), span.read<float>(at + 8) };
 }
 
 Aabb InstanceBounds(ByteSpan instances, size_t index) {

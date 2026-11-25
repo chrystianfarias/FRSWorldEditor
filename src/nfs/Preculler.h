@@ -30,6 +30,15 @@ public:
     // zone ids are the section numbers of the drivable sections.
     bool Parse(ByteSpan bunFile, bool underground1 = false);
 
+    // NFS World's container uses the same chunk ids but different records:
+    // 0x34152 is one polygon per section (i16 section number at +8, u8 point
+    // count at +10, bounds at +0x18, ring at +0x28; 48 + 8*count bytes), and
+    // 0x34153 maps a zone id (u16 at +12) to a section list (capacity at +16,
+    // count at +18, sections from +20; 20 + 2*capacity bytes). The zone id is the section whose
+    // polygon holds the camera. Library sections (U..Y) are listed by their
+    // 20000+ table numbers and are kept; the zeros after a list are slack.
+    bool ParseNfsw(ByteSpan bunFile);
+
     bool IsEmpty() const { return zones_.empty(); }
 
     size_t ZoneCount() const { return zones_.size(); }
@@ -40,8 +49,9 @@ public:
     // specific -- the one with the smallest footprint -- is the answer.
     // Merging every zone that claims the point instead inflates the set to
     // fifty-odd sections and puts back the pile this exists to remove.
-    // Returns false when no zone claims the point at all.
-    bool VisibleAt(const Vec3& point, std::vector<u32>& sections) const;
+    // Returns false when no zone claims the point at all. `zoneId` receives the
+    // claiming zone's id, or -1, so callers can log which zone produced a list.
+    bool VisibleAt(const Vec3& point, std::vector<u32>& sections, int* zoneId = nullptr) const;
 
     // Where no zone claims a point, the game keeps the zone the car came
     // from: the lists of every zone within `radius` of the point, any of
@@ -83,6 +93,10 @@ public:
     // The zone the game is in standing at a point (the smallest holding it),
     // as an index into Zones(); -1 where none is.
     int ZoneAt(float x, float y) const;
+    // Whether the zone's own polygon still holds the point. The car keeps the
+    // zone it is in while inside it, so an overlapping zone must not replace
+    // the visible list.
+    bool ZoneContains(u32 zoneId, float x, float y) const;
     // A zone's section list, or nullptr.
     const std::vector<u32>* ListOf(u32 zoneId) const;
     // Where the zone's list record sits in the layout file: the body after

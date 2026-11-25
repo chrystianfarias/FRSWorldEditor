@@ -19,7 +19,8 @@ public:
     // `showRaceGroups` false leaves out the polygons of race barrier groups,
     // which the game only switches on during the races that use them.
     bool Upload(IDirect3DDevice9* device, const nfs::LoadedSection& section,
-                bool showRaceGroups = true);
+                bool showRaceGroups = true, const nfs::CollisionPack* placed = nullptr,
+                const std::vector<nfs::NfswSmackableBox>* editedBoxes = nullptr);
 
     // The colour a surface is drawn in (0xRRGGBB), for the viewport and a legend.
     static u32 SurfaceRgb(u8 surface);

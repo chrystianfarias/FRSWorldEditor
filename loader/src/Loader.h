@@ -28,6 +28,7 @@ extern HMODULE g_module;
 // ---- the log and the settings, both beside the plugin
 
 void Log(const char* format, ...);
+const wchar_t* LogFile();
 std::wstring BesidePlugin(const wchar_t* extension);   // ".log", ".ini"
 int  Setting(const wchar_t* section, const wchar_t* key, int fallback);
 

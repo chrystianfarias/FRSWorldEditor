@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(FRSWorldLoader SHARED
     src/Main.cpp
+    src/Core.cpp
     src/FileEdits.cpp
     src/Markers.cpp
     src/Tracks.cpp
@@ -45,4 +46,26 @@ endif()
 # The ASI loader looks for .asi, which is just a renamed DLL.
 set_target_properties(FRSWorldLoader PROPERTIES
     OUTPUT_NAME "FRSWorldLoader"
+    SUFFIX ".asi")
+
+# The editor writes whole section BUNs
+# under <game>\\models\\files and this plugin opens them in place of the shipped
+# files. No UG2 memory patch is linked in; nfsw.exe has its own code.
+add_library(FRSWorldLoaderNFSW SHARED
+    src/NfswMain.cpp
+    src/Core.cpp
+    src/FileEdits.cpp
+    src/NfswVersion.rc
+)
+
+target_compile_definitions(FRSWorldLoaderNFSW PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
+
+if(MSVC)
+    target_compile_options(FRSWorldLoaderNFSW PRIVATE /W4 /permissive- /utf-8)
+    set_property(TARGET FRSWorldLoaderNFSW PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+endif()
+
+set_target_properties(FRSWorldLoaderNFSW PROPERTIES
+    OUTPUT_NAME "FRSWorldLoaderNFSW"
     SUFFIX ".asi")

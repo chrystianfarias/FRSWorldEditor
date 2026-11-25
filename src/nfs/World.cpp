@@ -4,20 +4,40 @@
 #include "nfs/CustomRegions.h"
 
 #include "io/MeshOverlay.h"
+#include "io/TextureImport.h"
 #include "nfs/Jdlz.h"
+#include "nfs/EaCompress.h"
+#include "nfs/NfswFormats.h"
+#include "nfs/NfswCollision.h"
 
 #include "core/Log.h"
 
 #include <windows.h>
 
 #include <cmath>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 
 #include <algorithm>
 #include <iterator>
+#include <string_view>
 
 namespace nfs {
+
+namespace {
+
+bool ReadWholeFile(const std::wstring& path, std::vector<u8>& out);   // defined with the UG1 code
+
+// The server names its holiday groups; the layout stores the same names as
+// 33x hashes. Lower case and punctuation are part of the name; no normalising.
+u32 SceneryGroupHash(const char* text) {
+    u32 hash = 0xFFFFFFFFu;
+    for (const unsigned char c : std::string_view(text)) hash = hash * 33u + c;
+    return hash;
+}
+
+} // namespace
 
 u64 PlacementKey(u32 modelHash, const Mat4& transform) {
     // Quantise so that values differing only by float noise agree. An eighth of
@@ -73,26 +93,54 @@ std::vector<std::wstring> World::AvailableRegions(const std::wstring& tracksDire
     WIN32_FIND_DATAW find{};
     const std::wstring pattern = tracksDirectory + L"\\STREAM*.BUN";
     HANDLE handle = ::FindFirstFileW(pattern.c_str(), &find);
-    if (handle == INVALID_HANDLE_VALUE) return regions;
+    if (handle != INVALID_HANDLE_VALUE) {
+        do {
+            std::wstring name = find.cFileName;               // STREAML4RA.BUN
+            if (name.size() <= 10) continue;
+            // Underground 1's per-track parts, STREAML1RA_1001.BUN, are not regions.
+            if (name.find(L'_') != std::wstring::npos) continue;
+            name = name.substr(6, name.size() - 6 - 4);       // L4RA
+            regions.push_back(name);
+        } while (::FindNextFileW(handle, &find));
+        ::FindClose(handle);
+    }
 
-    do {
-        std::wstring name = find.cFileName;               // STREAML4RA.BUN
-        if (name.size() <= 10) continue;
-        // Underground 1's per-track parts, STREAML1RA_1001.BUN, are not regions.
-        if (name.find(L'_') != std::wstring::npos) continue;
-        name = name.substr(6, name.size() - 6 - 4);       // L4RA
-        regions.push_back(name);
-    } while (::FindNextFileW(handle, &find));
-
-    ::FindClose(handle);
-    // The regions the editor made (nfs/CustomRegions.h), read through their source's files.
+    // NFS World has no STREAM<region>.BUN: the layout is <region>.BUN and its
+    // payload is STREAM<region>_<number>.BUN / STREAM<region>_0x<hash>.BUN.
+    // The exe is the marker: other games can have a layout without a single
+    // stream too, and must not be listed or opened as World regions.
     const size_t slash = tracksDirectory.find_last_of(L"\\/");
-    if (slash != std::wstring::npos)
-        for (const CustomRegion& custom : ReadCustomRegions(tracksDirectory.substr(0, slash)))
+    const std::wstring gameFolder = slash == std::wstring::npos ? L"" : tracksDirectory.substr(0, slash);
+    const bool nfswInstall = !gameFolder.empty() &&
+        ::GetFileAttributesW((gameFolder + L"\\nfsw.exe").c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (regions.empty() && nfswInstall) {
+        WIN32_FIND_DATAW layoutFind{};
+        HANDLE layouts = ::FindFirstFileW((tracksDirectory + L"\\*.BUN").c_str(), &layoutFind);
+        if (layouts != INVALID_HANDLE_VALUE) {
+            do {
+                const std::wstring name = layoutFind.cFileName;
+                if (name.size() <= 4 || name.rfind(L"STREAM", 0) == 0) continue;
+                const std::wstring stem = name.substr(0, name.size() - 4);
+                WIN32_FIND_DATAW partFind{};
+                HANDLE part = ::FindFirstFileW((tracksDirectory + L"\\STREAM" + stem + L"_*.BUN").c_str(),
+                                               &partFind);
+                if (part != INVALID_HANDLE_VALUE) {
+                    ::FindClose(part);
+                    regions.push_back(stem);
+                }
+            } while (::FindNextFileW(layouts, &layoutFind));
+            ::FindClose(layouts);
+        }
+    }
+
+    // The regions the editor made (nfs/CustomRegions.h), read through their source's files.
+    if (!gameFolder.empty())
+        for (const CustomRegion& custom : ReadCustomRegions(gameFolder))
             if (std::find(regions.begin(), regions.end(), custom.name) == regions.end() &&
                 std::find(regions.begin(), regions.end(), custom.source) != regions.end())
                 regions.push_back(custom.name);
     std::sort(regions.begin(), regions.end());
+    regions.erase(std::unique(regions.begin(), regions.end()), regions.end());
     return regions;
 }
 
@@ -114,6 +162,17 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
     // No layout file named after the region: Underground 1.
     if (::GetFileAttributesW((tracksDirectory + L"\\" + files + L".BUN").c_str()) == INVALID_FILE_ATTRIBUTES)
         return OpenUnderground1(tracksDirectory, region);
+
+    // NFS World has a layout file but no single STREAM<region>.BUN; its
+    // sections live in STREAM<region>_*.BUN files. Require nfsw.exe so a
+    // damaged or foreign layout is not parsed with the World readers.
+    const std::wstring gameFolder = slash == std::wstring::npos ? L"" : tracksDirectory.substr(0, slash);
+    const bool nfswInstall = !gameFolder.empty() &&
+        ::GetFileAttributesW((gameFolder + L"\\nfsw.exe").c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (nfswInstall &&
+        ::GetFileAttributesW((tracksDirectory + L"\\STREAM" + files + L".BUN").c_str()) ==
+            INVALID_FILE_ATTRIBUTES)
+        return OpenNfsw(tracksDirectory, region);
 
     if (!layout_.Open(tracksDirectory + L"\\" + files + L".BUN"))
         return false;
@@ -192,6 +251,72 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
     return true;
 }
 
+bool World::OpenNfsw(const std::wstring& tracksDirectory, const std::wstring& region) {
+    const size_t slash = tracksDirectory.find_last_of(L"\\/");
+    const std::wstring gameFolder = slash == std::wstring::npos ? L"" : tracksDirectory.substr(0, slash);
+    if (gameFolder.empty() ||
+        ::GetFileAttributesW((gameFolder + L"\\nfsw.exe").c_str()) == INVALID_FILE_ATTRIBUTES)
+        return false;
+    std::wstring layoutPath = tracksDirectory + L"\\" + region + L".BUN";
+    bool unpackedLayout = false;
+    if (!overlayFolder_.empty()) {
+        const std::wstring saved = overlayFolder_ + L"\\files\\TRACKS\\" + region + L".BUN";
+        if (::GetFileAttributesW(saved.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            layoutPath = saved;
+            unpackedLayout = true;
+        }
+    }
+    // An overlay layout is read into memory, not mapped: saving a rebuilt
+    // section writes the same L5RA.BUN back, and a mapped file cannot be
+    // replaced on Windows. The shipped layout keeps its mapping.
+    if (unpackedLayout) {
+        if (!ReadWholeFile(layoutPath, layoutUnpacked_)) return false;
+    } else if (!layout_.Open(layoutPath)) {
+        return false;
+    }
+    const ByteSpan layout = LayoutSpan();
+    if (layout.empty() || !table_.ParseNfsw(layout)) {
+        layout_.Close();
+        layoutUnpacked_.clear();
+        return false;
+    }
+
+    game_ = Game::World;
+    region_ = region;
+    tracksDirectory_ = tracksDirectory;
+    ReadSceneryGroups(layout);
+    NfswReadSmackableTypes(layout, smackableTypes_);
+    ReloadSmackableAttributes();
+    // NFS World has its own visibility-list layout. The renderer only draws
+    // the sections this returns for the camera's zone; without it the editor
+    // shows every preplaced/distant layer at once and low-detail copies end up
+    // on top of the detailed roads.
+    if (!preculler_.ParseNfsw(layout))
+        LOG_WARN("NFS World visibility lists were not parsed");
+    sectionFiles_.assign(table_.Sections().size(), {});
+    sectionToLoaded_.assign(table_.Sections().size(), -1);
+    OpenGlobalPacks(tracksDirectory);
+
+    LOG_INFO("NFS World region %S: %zu section files, layout %zu bytes",
+             region.c_str(), table_.Sections().size(), layout.size);
+    return true;
+}
+
+std::wstring World::NfswSectionFileName(const Section& section) const {
+    wchar_t name[64] = {};
+    if (section.streamHash)
+        ::swprintf_s(name, L"STREAM%s_0x%08X.BUN", region_.c_str(), section.streamHash);
+    else
+        ::swprintf_s(name, L"STREAM%s_%u.BUN", region_.c_str(), section.number);
+    return name;
+}
+
+std::wstring World::NfswSectionPath(size_t index) const {
+    const auto& sections = table_.Sections();
+    if (index >= sections.size()) return {};
+    return tracksDirectory_ + L"\\" + NfswSectionFileName(sections[index]);
+}
+
 std::vector<size_t> World::SectionsLoadedThroughout(const std::vector<Vec3>& points) const {
     std::vector<size_t> out;
     if (preculler_.IsEmpty() || points.empty()) return out;
@@ -266,6 +391,256 @@ void World::ReadTextureAnimations(const Chunk& container) {
     }
 }
 
+void World::ReadSceneryGroups(ByteSpan layout) {
+    sceneryGroups_.clear();
+    sceneryEntries_.clear();
+    ChunkReader reader(layout, 0);
+    Chunk chunk;
+    while (reader.Next(chunk)) {
+        if (chunk.id == 0x34109u) {
+            const ByteSpan data = chunk.data;
+            size_t at = 0;
+            while (at + 25 <= data.size) {
+                const i16 count = data.read<i16>(at + 14);
+                if (count < 0) break;
+                const size_t stride = ((size_t)count * 2 + 25) & ~(size_t)3;
+                if (stride < 24 || at + stride > data.size) break;
+                const u32 hash = data.read<u32>(at + 8);
+                SceneryGroup group;
+                group.id = data.read<u16>(at + 12);
+                group.entries.reserve((size_t)count);
+                for (u32 i = 0; i < (u32)count; ++i)
+                    group.entries.push_back(data.read<u16>(at + 20 + (size_t)i * 2));
+                if (hash && !group.entries.empty()) sceneryGroups_[hash] = std::move(group);
+                at += stride;
+            }
+        } else if (chunk.id == 0x34108u) {
+            const size_t count = chunk.data.size / 6;
+            sceneryEntries_.resize(count);
+            for (size_t i = 0; i < count; ++i) {
+                SceneryEntry& entry = sceneryEntries_[i];
+                entry.chunk    = chunk.data.read<u16>(i * 6);
+                entry.instance = chunk.data.read<u16>(i * 6 + 2);
+                entry.flags    = chunk.data.read<u16>(i * 6 + 4);
+            }
+        }
+    }
+    LOG_INFO("NFS World scenery: %zu groups, %zu table entries",
+             sceneryGroups_.size(), sceneryEntries_.size());
+}
+
+void World::HideEntry(size_t entry) {
+    if (entry >= sceneryEntries_.size()) return;
+    const SceneryEntry& source = sceneryEntries_[entry];
+    const auto chunk = chunkInstances_.find(source.chunk);
+    if (chunk == chunkInstances_.end() ||
+        source.instance >= chunk->second.recordToInstance.size())
+        return;
+    const u32 instance = chunk->second.recordToInstance[source.instance];
+    if (instance == ~0u) return;
+    holidayHidden_.insert(((u64)chunk->second.section << 32) | instance);
+}
+
+bool World::PlainSceneryFlags(u16 entry, u32 chunk, u32 record, u16& flags) const {
+    if (entry >= sceneryEntries_.size()) return false;
+    const SceneryEntry& binding = sceneryEntries_[entry];
+    if (binding.chunk != chunk || binding.instance != record || (binding.flags & 0x18)) return false;
+    flags = binding.flags;
+    return true;
+}
+
+std::optional<NfswSmackablePlacement> World::SmackablePlacement(const LoadedSection& section, size_t index) const {
+    const auto* link = FindSmackableLink(section, index);
+    if (!link || link->box == SIZE_MAX) return std::nullopt;
+    return NfswSmackablePlacement{ *link, section.smackableBoxes[link->box],
+        section.scenery.instances[index].transform, sceneryEntries_[link->entry].flags };
+}
+
+const NfswSmackableLink* World::FindSmackableLink(const LoadedSection& section, size_t index) const {
+    const auto shape = section.smackableScenery.find(index);
+    return shape == section.smackableScenery.end() ? nullptr : &section.smackableLinks[shape->second];
+}
+
+bool World::RebindSmackable(LoadedSection& section, size_t index, u32 key) const {
+    const auto binding = section.smackableScenery.find(index);
+    if (binding == section.smackableScenery.end() || !FindSmackableAttributes(key)) return false;
+    auto& link = section.smackableLinks[binding->second];
+    if (link.physics != key) {
+        link.physics = key;
+        section.placementsChanged = true;
+    }
+    return true;
+}
+
+bool World::RebindSmackable(LoadedSection& section, PlacedInstance& item, u32 key) {
+    if (!item.smackable || !FindSmackableAttributes(key)) return false;
+    if (item.originalRecord != ~0u) {
+        const auto [source, index] = SmackableSource(item);
+        if (!source || !RebindSmackable(*source, index, key)) return false;
+    }
+    if (item.smackable->link.physics != key) {
+        item.smackable->link.physics = key;
+        section.placementsChanged = true;
+    }
+    return true;
+}
+
+std::pair<LoadedSection*, size_t> World::SmackableSource(const PlacedInstance& item) {
+    for (const auto& source : loaded_) {
+        if (!source->info || source->info->number != item.originalSection) continue;
+        const auto& instances = source->scenery.instances;
+        for (size_t i = 0; i < instances.size(); ++i)
+            if (instances[i].sceneryNumber == item.originalSceneryNumber && instances[i].record == item.originalRecord)
+                return { source.get(), i };
+    }
+    return { nullptr, SIZE_MAX };
+}
+
+bool World::ResizeSmackableBox(LoadedSection& section, size_t index, const NfswSmackableHalfSizes& sizes) {
+    const auto binding = section.smackableScenery.find(index);
+    if (binding == section.smackableScenery.end()) return false;
+    auto& link = section.smackableLinks[binding->second];
+    if (!link.singleBox || *std::min_element(sizes.begin(), sizes.end()) <= 0) return false;
+    link.halfSizes = sizes;
+    section.placementsChanged = true;
+    return true;
+}
+
+bool World::ResizeSmackableBox(LoadedSection& section, PlacedInstance& item, const NfswSmackableHalfSizes& sizes) {
+    if (!item.smackable || !item.smackable->link.singleBox || *std::min_element(sizes.begin(), sizes.end()) <= 0)
+        return false;
+    if (item.originalRecord != ~0u) {
+        const auto [source, index] = SmackableSource(item);
+        if (!source || !ResizeSmackableBox(*source, index, sizes)) return false;
+    }
+    item.smackable->link.halfSizes = sizes;
+    section.placementsChanged = true;
+    return true;
+}
+
+const NfswSmackableAttributes* World::FindSmackableAttributes(u32 key) const {
+    const auto found = smackableAttributes_.find(key);
+    return found == smackableAttributes_.end() ? nullptr : &found->second;
+}
+
+bool World::ReloadSmackableAttributes() {
+    smackableAttributes_.clear();
+    smackableAttributeOverlay_ = false;
+    if (!IsWorld()) return false;
+
+    const auto path = NfswAttributesFile(&smackableAttributeOverlay_);
+    if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+    FileMap file;
+    if (!file.Open(path) || !NfswReadSmackableAttributes(file.Span(), smackableAttributes_)) {
+        LOG_WARN("NFS World smackable collections could not be read from %S", path.c_str());
+        return false;
+    }
+    LOG_INFO("NFS World: %zu smackable collections from %S", smackableAttributes_.size(), path.c_str());
+    return true;
+}
+
+std::wstring World::NfswAttributesFile(bool* overlay) const {
+    if (overlay) *overlay = false;
+    if (!overlayFolder_.empty()) {
+        const auto path = overlayFolder_ + L"\\" + kNfswAttributesOverlayPath;
+        const DWORD attributes = ::GetFileAttributesW(path.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            if (overlay) *overlay = true;
+            return path;
+        }
+    }
+    const size_t slash = tracksDirectory_.find_last_of(L"\\/");
+    return tracksDirectory_.substr(0, slash) + L"\\" + kNfswAttributesPath;
+}
+
+void World::HideSceneryGroup(u32 hash, bool hide) {
+    const auto group = sceneryGroups_.find(hash);
+    if (group == sceneryGroups_.end()) return;
+    for (const u16 entry : group->second.entries) {
+        if (entry >= sceneryEntries_.size()) continue;
+        const SceneryEntry& source = sceneryEntries_[entry];
+        const auto chunk = chunkInstances_.find(source.chunk);
+        if (chunk == chunkInstances_.end() ||
+            source.instance >= chunk->second.recordToInstance.size())
+            continue;
+        const u32 instance = chunk->second.recordToInstance[source.instance];
+        if (instance == ~0u) continue;
+        const u64 key = ((u64)chunk->second.section << 32) | instance;
+        if (hide) holidayHidden_.insert(key);
+        else      holidayHidden_.erase(key);
+    }
+}
+
+void World::SetHoliday(Holiday holiday) {
+    holiday_ = holiday;
+    holidayHidden_.clear();
+
+    struct Choice {
+        Holiday      id;
+        const char*  on;
+        const char*  off;
+    };
+    static const Choice choices[] = {
+        { Holiday::Halloween,   "SCENERY_GROUP_HALLOWEEN",   "SCENERY_GROUP_HALLOWEEN_DISABLE" },
+        { Holiday::Oktoberfest, "SCENERY_GROUP_OKTOBERFEST", "SCENERY_GROUP_OKTOBERFEST_DISABLE" },
+        { Holiday::Christmas,   "SCENERY_GROUP_CHRISTMAS",   "SCENERY_GROUP_CHRISTMAS_DISABLE" },
+        { Holiday::Valentines,  "SCENERY_GROUP_VALENTINES",  "SCENERY_GROUP_VALENTINES_DISABLE" },
+        { Holiday::NewYears,    "SCENERY_GROUP_NEWYEARS",    "SCENERY_GROUP_NEWYEARS_DISABLE" },
+        { Holiday::TopGear,     "SCENERY_GROUP_TOPGEAR",     "SCENERY_GROUP_TOPGEAR_DISABLE" },
+    };
+
+    // The entry flags say which placements the groups own: 0x10 is set on
+    // every holiday, Top Gear and track-barrier entry and on nothing else
+    // (DisableAllSceneryGroups ORs 0x18 into exactly those at shutdown).
+    // Each pair also has a _DISABLE list standing in for the plain world --
+    // the Christmas pair swaps the golf course for its snow version, the Top
+    // Gear pair swaps the plain billboards. Every group starts hidden, then
+    // the selected holiday's own group and everyone else's disable list come
+    // back: that is what free roam sees, and Normal is simply the case where
+    // no holiday is selected. All is the diagnostic view: only the disable
+    // lists stay hidden, so every group shows at once.
+    if (holiday == Holiday::All) {
+        for (const Choice& choice : choices)
+            HideSceneryGroup(SceneryGroupHash(choice.off), true);
+    } else {
+        for (size_t entry = 0; entry < sceneryEntries_.size(); ++entry)
+            if (sceneryEntries_[entry].flags & 0x10) HideEntry(entry);
+        for (const Choice& choice : choices) {
+            if (choice.id == holiday)
+                HideSceneryGroup(SceneryGroupHash(choice.on), false);
+            else
+                HideSceneryGroup(SceneryGroupHash(choice.off), false);
+        }
+    }
+    LOG_INFO("NFS World scenery groups %d: %zu instances hidden",
+             (int)holiday, holidayHidden_.size());
+}
+
+bool World::HolidayHides(u32 sectionNumber, int instance) const {
+    if (instance < 0 || holidayHidden_.empty()) return false;
+    return holidayHidden_.find(((u64)sectionNumber << 32) | (u32)instance) != holidayHidden_.end();
+}
+
+size_t World::SceneryOverrideCount() const {
+    return sceneryEntries_.size();
+}
+
+void World::RegisterNfswAnimations(const TexturePack& pack) {
+    for (const TextureFrameAnimation& source : pack.Animations()) {
+        if (source.frames.size() < 2 || source.fps <= 0.0f) continue;
+        // Materials can name any frame of the cycle, not the slot's key hash.
+        // Register each frame so that material starts its cycle there.
+        for (size_t i = 0; i < source.frames.size(); ++i) {
+            TextureAnimation animation;
+            animation.name       = source.name;
+            animation.frames     = source.frames;
+            animation.fps        = source.fps;
+            animation.startFrame = (u8)i;
+            textureAnimations_.emplace(source.frames[i], std::move(animation));
+        }
+    }
+}
+
 std::string World::RaceBarrierGroupName(u8 group) const {
     if (group == 0) return "NONE";
     if (group < raceGroups_.size()) return raceGroups_[group];
@@ -274,9 +649,16 @@ std::string World::RaceBarrierGroupName(u8 group) const {
 
 void World::Close() {
     region_.clear();
+    tracksDirectory_.clear();
     raceGroups_.clear();
     textureAnimations_.clear();
+    sceneryGroups_.clear();
+    sceneryEntries_.clear();
+    chunkInstances_.clear();
+    holidayHidden_.clear();
+    holiday_ = Holiday::Normal;
     objectAnimations_.Clear();
+    sceneryAnimations_.clear();
     layout_.Close();
     layoutUnpacked_.clear();
     layoutUnpacked_.shrink_to_fit();
@@ -286,7 +668,12 @@ void World::Close() {
     stream_.Close();
     globalPacks_.clear();
     globalFiles_.clear();
+    globalData_.clear();
     loaded_.clear();
+    sectionFiles_.clear();
+    smackableTypes_.clear();
+    smackableAttributes_.clear();
+    smackableAttributeOverlay_ = false;
     sectionToLoaded_.clear();
     modelsByHash_.clear();
     modelHome_.clear();
@@ -347,19 +734,28 @@ const LoadedSection* World::LoadSection(const Section& section) {
     // Mark as visited up front so a section without geometry is not re-parsed.
     sectionToLoaded_[index] = -2;
 
+    const bool nfsw = IsWorld();
+    const u64 bufferOffset = nfsw ? 0 : section.streamOffset;
+
     // A section that moved past the end of the file is not an error: its bytes
     // live in a span, and the check below would reject it for pointing at
     // nothing.
     bool relocated = false;
-    for (const SpanOverlay& span : spans_)
-        if (!span.layoutFile && span.fileOffset == section.streamOffset) relocated = true;
+    if (!nfsw) {
+        for (const SpanOverlay& span : spans_)
+            if (!span.layoutFile && span.fileOffset == section.streamOffset) relocated = true;
 
-    if (!relocated && section.streamOffset + section.streamSize > stream_.Size()) {
-        LOG_WARN("section %s points outside the stream file", section.name.c_str());
-        return nullptr;
+        if (!relocated && section.streamOffset + section.streamSize > stream_.Size()) {
+            LOG_WARN("section %s points outside the stream file", section.name.c_str());
+            return nullptr;
+        }
     }
 
     const ByteSpan buffer = SectionBytes(section);
+    if (buffer.empty()) {
+        LOG_WARN("section %s has no readable bytes", section.name.c_str());
+        return nullptr;
+    }
 
     auto loadedSection = std::make_unique<LoadedSection>();
     loadedSection->info = &section;
@@ -367,8 +763,8 @@ const LoadedSection* World::LoadSection(const Section& section) {
     // When the section comes from an earlier save, the shipped scenery counts
     // say which records are the editor's own.
     std::vector<size_t> shippedInstances;
-    const bool fromSpan = buffer.data < stream_.Span().data ||
-                          buffer.data >= stream_.Span().data + stream_.Size();
+    const bool fromSpan = !nfsw && (buffer.data < stream_.Span().data ||
+                                    buffer.data >= stream_.Span().data + stream_.Size());
     if (fromSpan &&
         section.originalStreamOffset + (u64)section.originalStreamSize <= stream_.Size()) {
         const ByteSpan original =
@@ -384,17 +780,36 @@ const LoadedSection* World::LoadSection(const Section& section) {
         }
     }
     size_t sceneryIndex = 0;
+    std::vector<Chunk> animationChunks;
 
-    ChunkReader reader(buffer, section.streamOffset);
+    ChunkReader reader(buffer, bufferOffset);
     Chunk chunk;
     while (reader.Next(chunk)) {
+        if (nfsw) {
+            switch (chunk.id) {
+                case kChunkSmackableSpawners:
+                    NfswReadSmackableBoxes(chunk, smackableTypes_, loadedSection->smackableBoxes,
+                                          loadedSection->smackableLinks);
+                    continue;
+                case kChunkSceneryAnimHeader:
+                case kChunkSceneryAnimFrames:
+                case kChunkSceneryAnimNode:
+                case kChunkSceneryAnimTree:
+                case kChunkSceneryAnimEnd:
+                    animationChunks.push_back(chunk);
+                    continue;
+                default:
+                    break;
+            }
+        }
         if (chunk.id == kChunkSolidListPack) {
             SolidList list;
-            if (ParseSolidList(chunk, list)) {
+            const bool parsed = nfsw ? NfswParseSolidList(chunk, list) : ParseSolidList(chunk, list);
+            if (parsed) {
                 // An edited mesh replaces its positions here, before anything
                 // measures bounds or uploads it, so every consumer sees the
                 // shape the game will be handed and not the shipped one.
-                if (!overlays_.empty()) {
+                if (!nfsw && !overlays_.empty()) {
                     for (SolidObject& object : list.objects) {
                         const auto found = overlays_.find(object.hash);
                         if (found == overlays_.end()) continue;
@@ -420,6 +835,21 @@ const LoadedSection* World::LoadSection(const Section& section) {
         } else if (chunk.id == kChunkTrackScenery) {
             const ByteSpan whole{ chunk.raw.data - 8, chunk.raw.size + 8 };
             SceneryChunkInfo info;
+            if (nfsw) {
+                NfswSceneryChunkInfo nfswInfo;
+                if (!NfswReadSceneryChunk(whole, bufferOffset, nfswInfo)) continue;
+                loadedSection->sceneryNumbers.push_back(nfswInfo.number);
+
+                Scenery& scenery = loadedSection->scenery;
+                const size_t before = scenery.instances.size();
+                ChunkInstances& placed = chunkInstances_[nfswInfo.number];
+                placed.section = section.number;
+                if (!NfswParseScenery(chunk, scenery, &placed.recordToInstance)) continue;
+                for (size_t i = before; i < scenery.instances.size(); ++i)
+                    scenery.instances[i].sceneryNumber = nfswInfo.number;
+                continue;
+            }
+
             ReadSceneryChunk(whole, chunk.headerOffset, info);
             loadedSection->sceneryNumbers.push_back(info.number);
 
@@ -478,6 +908,7 @@ const LoadedSection* World::LoadSection(const Section& section) {
                     loadedSection->placements.push_back({ info.number, std::move(p) });
             }
         } else if (chunk.id == kChunkCollisionPack) {
+            if (nfsw) continue;   // NFS World collision (0x3B800) is not decoded
             CollisionPack pack;
             if (ParseCollision(chunk, pack)) {
                 // Opt-in check that the encoder reproduces the shipped pack:
@@ -502,9 +933,12 @@ const LoadedSection* World::LoadSection(const Section& section) {
             }
         } else if (chunk.id == kChunkTexturePack) {
             auto pack = std::make_unique<TexturePack>();
-            if (pack->Parse(chunk))
+            const bool parsed = nfsw ? pack->ParseNfsw(chunk) : pack->Parse(chunk);
+            if (parsed) {
+                if (nfsw) RegisterNfswAnimations(*pack);
                 loadedSection->texturePacks.push_back(std::move(pack));
-        } else if (chunk.id == 0xB0300100u) {
+            }
+        } else if (!nfsw && chunk.id == 0xB0300100u) {
             ReadTextureAnimations(chunk);
         }
     }
@@ -517,6 +951,51 @@ const LoadedSection* World::LoadSection(const Section& section) {
         loadedSection->brokenObjectList = true;
         LOG_WARN("section %s: its object list was written broken by an older version "
                  "(the game crashes at 0x493832); it is rebuilt at the next save", section.name.c_str());
+    }
+
+    for (size_t link = 0; link < loadedSection->smackableLinks.size(); ++link) {
+        const u32 entry = loadedSection->smackableLinks[link].entry;
+        if (entry >= sceneryEntries_.size()) continue;
+        const SceneryEntry& reference = sceneryEntries_[entry];
+        const auto chunkAt = chunkInstances_.find(reference.chunk);
+        if (chunkAt == chunkInstances_.end() || chunkAt->second.section != section.number ||
+            reference.instance >= chunkAt->second.recordToInstance.size()) continue;
+        const u32 instanceIndex = chunkAt->second.recordToInstance[reference.instance];
+        if (instanceIndex == ~0u) continue;
+        const auto [binding, inserted] = loadedSection->smackableScenery.emplace(instanceIndex, link);
+        if (!inserted && loadedSection->smackableLinks[binding->second].box == SIZE_MAX)
+            binding->second = link;
+    }
+
+    if (nfsw && !overlayFolder_.empty() && !loadedSection->scenery.instances.empty()) {
+        const auto overlay = overlayFolder_ + L"\\files\\TRACKS\\" + NfswSectionFileName(section);
+        if (::GetFileAttributesW(overlay.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            std::vector<u8> bytes;
+            if (ReadWholeFile(tracksDirectory_ + L"\\" + NfswSectionFileName(section), bytes)) {
+                const Scenery stock = NfswReadSectionScenery({ bytes.data(), bytes.size() });
+                loadedSection->nfswEditedScenery = NfswChangedPlacements(stock, loadedSection->scenery);
+            }
+        }
+    }
+
+    if (nfsw && !animationChunks.empty()) {
+        std::vector<NfswObjectAnimation> animations;
+        NfswParseAnimations(animationChunks, animations);
+        for (NfswObjectAnimation& animation : animations)
+            if (animation.guid) sceneryAnimations_[animation.guid] = std::move(animation);
+    }
+
+    if (nfsw && section.number == kNfswCollisionSection) {
+        CollisionPack walls;
+        walls.sectionNumber = section.number;
+        if (NfswReadCollisionWalls(buffer, walls.polygons)) {
+            for (const CollisionPolygon& wall : walls.polygons)
+                for (const Vec3& point : wall.corners) walls.bounds.Add(point);
+            loadedSection->collision.push_back(std::move(walls));
+            NfswReadNativeCollision(buffer, loadedSection->collision);
+        } else {
+            LOG_WARN("NFS World editable walls could not be read");
+        }
     }
 
     if (IsUnderground1()) {
@@ -560,11 +1039,11 @@ const LoadedSection* World::LoadSection(const Section& section) {
         if (fromSpan && section.originalStreamOffset + (u64)section.originalStreamSize <= stream_.Size()) {
             ChunkReader shipped(stream_.Span().sub(section.originalStreamOffset, section.originalStreamSize),
                                 section.originalStreamOffset);
-            Chunk chunk;
-            while (shipped.Next(chunk)) {
-                if (chunk.id != kChunkCollisionPack) continue;
+            Chunk shippedChunk;
+            while (shipped.Next(shippedChunk)) {
+                if (shippedChunk.id != kChunkCollisionPack) continue;
                 CollisionPack pack;
-                if (ParseCollision(chunk, pack)) shippedPacks.push_back(CollisionFingerprint(pack));
+                if (ParseCollision(shippedChunk, pack)) shippedPacks.push_back(CollisionFingerprint(pack));
             }
         }
         for (size_t k = 0; k < loadedSection->collision.size(); ++k) {
@@ -632,6 +1111,29 @@ const LoadedSection* World::LoadSection(const Section& section) {
 }
 
 ByteSpan World::SectionBytes(const Section& section) const {
+    if (IsWorld()) {
+        const auto& sections = table_.Sections();
+        const size_t index = (size_t)(&section - sections.data());
+        if (index >= sectionFiles_.size()) return {};
+        std::vector<u8>& bytes = sectionFiles_[index];
+        if (bytes.empty()) {
+            std::wstring path = NfswSectionPath(index);
+            // The editor shows what the game will read: a saved overlay wins
+            // over the shipped file, exactly as FRSWorldLoaderNFSW does at run
+            // time. Without it a reopened region would forget its own save.
+            if (!overlayFolder_.empty()) {
+                const std::wstring saved = overlayFolder_ + L"\\files\\TRACKS\\" +
+                                           NfswSectionFileName(sections[index]);
+                if (::GetFileAttributesW(saved.c_str()) != INVALID_FILE_ATTRIBUTES) path = saved;
+            }
+            if (!ReadWholeFile(path, bytes)) {
+                LOG_WARN("could not read section file %S", path.c_str());
+                return {};
+            }
+        }
+        return ByteSpan{ bytes.data(), bytes.size() };
+    }
+
     // A rebuilt section is read out of its span instead of out of the file. The
     // span holds the section whole, so it stands in for that range exactly.
     for (const SpanOverlay& span : spans_) {
@@ -652,6 +1154,56 @@ void World::LoadAllSections(void (*progress)(size_t, size_t, void*), void* userD
     // places, now that every section's models are known.
     if (IsUnderground1())
         for (auto& section : loaded_) NameUnderground1Scenery(*section);
+
+    // NFS World stores four LOD hashes per scenery info. The first is the one
+    // the renderer wants, but a few infos name a model that only another LOD
+    // slot resolves; now that every section is loaded, fall back along them.
+    if (IsWorld()) {
+        // Z0 owns the files, but each native wall pack has its own section
+        // number. Edit and redraw it with that section so dragging one wall
+        // does not reupload the collision for the whole city.
+        const Section* z0 = table_.FindByNumber(kNfswCollisionSection);
+        if (z0) {
+            const int home = sectionToLoaded_[(size_t)(z0 - sections.data())];
+            if (home >= 0) {
+                auto& packs = loaded_[(size_t)home]->collision;
+                auto keep = packs.begin();
+                for (CollisionPack& pack : packs) {
+                    const Section* owner = table_.FindByNumber(pack.sectionNumber);
+                    const int target = owner ? sectionToLoaded_[(size_t)(owner - sections.data())] : -1;
+                    if (target >= 0 && target != home) {
+                        loaded_[(size_t)target]->collision.push_back(std::move(pack));
+                    } else {
+                        if (&*keep != &pack) *keep = std::move(pack);
+                        ++keep;
+                    }
+                }
+                packs.erase(keep, packs.end());
+            }
+        }
+        size_t fixed = 0, unresolved = 0;
+        for (auto& section : loaded_)
+            for (SceneryInfo& info : section->scenery.infos) {
+                if (modelsByHash_.count(info.solidHash)) continue;
+                bool found = false;
+                for (size_t k = 1; k < 4 && info.raw.size() >= 0x18 + (k + 1) * 4; ++k) {
+                    u32 hash = 0;
+                    std::memcpy(&hash, info.raw.data() + 0x18 + k * 4, 4);
+                    if (hash && modelsByHash_.count(hash)) {
+                        info.solidHash = hash;
+                        ++fixed;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) ++unresolved;
+            }
+        if (fixed || unresolved)
+            LOG_INFO("scenery LOD fallback: %zu infos remapped, %zu still unresolved", fixed, unresolved);
+    }
+
+    // The group filter needs every section's chunk maps.
+    if (IsWorld()) SetHoliday(holiday_);
 
     size_t objects = 0, triangles = 0;
     for (const auto& section : loaded_) {
@@ -715,14 +1267,58 @@ static bool HasModelToBuildFrom(const LoadedSection& section) {
     return false;
 }
 
+std::optional<Vec3> World::RoadPlacementAnchor(const PlacedInstance& placement) const {
+    if (!IsWorld()) return {};
+    const SolidObject* model = FindModel(placement.modelHash);
+    if (!model || !model->bounds.Valid()) return {};
+    const bool baked = model->name.rfind("FRS_ROAD_", 0) == 0;
+    if (!baked && (!model->HasNfswRoadSurface() ||
+                   (!model->IsTerrain() && model->name.find("_CHOP_") == std::string::npos))) return {};
+
+    const Aabb bounds = Transform(model->bounds, placement.transform);
+    const Vec3 centre = bounds.Center();
+    const Ray down{ { centre.x, centre.y, bounds.max.z + 1.0f }, { 0, 0, -1 } };
+    float bestHit = 1e30f, nearest = 1e30f;
+    Vec3 anchor = centre;
+    for (const auto& material : model->materials) {
+        if (!baked && !material.nfswRoadSurface) continue;
+        const size_t end = std::min((size_t)material.firstIndex + material.indexCount, model->indices.size());
+        for (size_t i = material.firstIndex; i + 2 < end; i += 3) {
+            const auto a = model->indices[i], b = model->indices[i + 1], c = model->indices[i + 2];
+            if (std::max({ a, b, c }) >= model->vertices.size()) continue;
+            const Vec3 x = placement.transform.TransformPoint(model->vertices[a].position);
+            const Vec3 y = placement.transform.TransformPoint(model->vertices[b].position);
+            const Vec3 z = placement.transform.TransformPoint(model->vertices[c].position);
+            const Vec3 normal = Cross(y - x, z - x);
+            if (std::abs(normal.z) < 1e-6f || std::abs(normal.z) < Length(normal) * 0.35f) continue;
+            const float hit = IntersectRayTriangle(down, x, y, z);
+            if (hit >= 0.0f) bestHit = std::min(bestHit, hit);
+            // The bounds centre can be outside a curved or L-shaped road mesh.
+            const Vec3 middle = (x + y + z) * (1.0f / 3.0f);
+            const float dx = middle.x - centre.x, dy = middle.y - centre.y;
+            if (dx * dx + dy * dy < nearest) {
+                nearest = dx * dx + dy * dy;
+                anchor = middle;
+            }
+        }
+    }
+    return bestHit < 1e30f ? down.origin + down.direction * bestHit : anchor;
+}
+
 size_t World::SectionForPlacement(const Vec3& point) const {
     size_t best = SIZE_MAX, nearest = SIZE_MAX;
     float bestDistance = 1e30f, nearestDistance = 1e30f;
+    std::vector<u32> visible;
+    if (IsWorld()) preculler_.VisibleAt(point, visible);
 
     for (size_t i = 0; i < loaded_.size(); ++i) {
         const LoadedSection& candidate = *loaded_[i];
         if (!candidate.info || IsLibrary(candidate) || IsUnusedAlternate(*candidate.info)) continue;
-        if (!HasModelToBuildFrom(candidate)) continue;
+        if (IsWorld()) {
+            if (!visible.empty() &&
+                !std::binary_search(visible.begin(), visible.end(), candidate.info->number))
+                continue;
+        } else if (!HasModelToBuildFrom(candidate)) continue;
         if (std::find(candidate.sceneryNumbers.begin(), candidate.sceneryNumbers.end(),
                       candidate.info->number) == candidate.sceneryNumbers.end())
             continue;
@@ -754,7 +1350,7 @@ size_t World::SectionForPlacementAlong(const std::vector<Vec3>& points) const {
     for (size_t i : SectionsLoadedThroughout(points)) {
         const LoadedSection& candidate = *loaded_[i];
         if (!candidate.info || IsLibrary(candidate) || IsUnusedAlternate(*candidate.info)) continue;
-        if (!HasModelToBuildFrom(candidate)) continue;
+        if (!IsWorld() && !HasModelToBuildFrom(candidate)) continue;
         if (std::find(candidate.sceneryNumbers.begin(), candidate.sceneryNumbers.end(), candidate.info->number) ==
             candidate.sceneryNumbers.end())
             continue;
@@ -801,6 +1397,33 @@ u32 World::TextureUsage(u32 hash) const {
     return it == textureUsage_.end() ? 0u : it->second;
 }
 
+u32 World::NativeRoadTexture(const std::string& texture) const {
+    if (!IsWorld()) return 0;
+    std::string name = texture;
+    for (char& c : name) c = (char)std::toupper((unsigned char)c);
+    if (name.rfind("RDP_", 0) != 0) return 0;
+
+    const char* stock = "TRS_PAVA_01_D";
+    if (name == "RDP_INTERSECTMIDTILE") stock = "TRS_PAVA_INT_01_D";
+    else if (name == "RDP_INTERSECT_AA_WH") stock = "TRN_PAVA_PED_01_D";
+    else if (name == "RDP_ROADSTRIP_MC") stock = "TRN_CONCRETEHORIZCUT_NL_01_D";
+    else if (name.rfind("RDP_LANE", 0) == 0) {
+        if (name.find("_YS_") != std::string::npos) stock = "TRN_PAVA_YL_01_D";
+        else if (name.find("_YD_") != std::string::npos) stock = "TRN_PAVA_YDIAL_01_D";
+        else if (name.find("_WD_") != std::string::npos) stock = "TRN_PAVA_WD_01_D";
+        else if (name.find("_WS_") != std::string::npos || name.find("_WL_") != std::string::npos)
+            stock = "TRN_PAVA_WL_01_D";
+    } else if (const u32 original = TextureNameHash(name); TextureUsage(original) && FindTexture(original)) {
+        return original;
+    }
+
+    for (const char* candidate : { stock, "TRS_PAVA_01_D", "TRS_PAVB_INT_01_D" }) {
+        const u32 hash = TextureNameHash(candidate);
+        if (TextureUsage(hash) && FindTexture(hash)) return hash;
+    }
+    return 0;
+}
+
 const Texture* World::FindTexture(u32 hash) const {
     for (const auto& section : loaded_)
         for (const auto& pack : section->texturePacks)
@@ -836,22 +1459,86 @@ void World::OpenGlobalPacks(const std::wstring& tracksDirectory) {
         while (::FindNextFileW(search, &found));
         ::FindClose(search);
     }
+
+    // NFS World keeps its shared effects and sky textures in GLOBAL\*.bin TPKs
+    // and in the JDLZ-compressed GLOBAL\*.lzc containers.
+    if (IsWorld()) {
+        WIN32_FIND_DATAW globalFind{};
+        HANDLE global = ::FindFirstFileW((game + L"\\GLOBAL\\*.bin").c_str(), &globalFind);
+        if (global != INVALID_HANDLE_VALUE) {
+            do paths.push_back(game + L"\\GLOBAL\\" + globalFind.cFileName);
+            while (::FindNextFileW(global, &globalFind));
+            ::FindClose(global);
+        }
+        global = ::FindFirstFileW((game + L"\\GLOBAL\\*.lzc").c_str(), &globalFind);
+        if (global != INVALID_HANDLE_VALUE) {
+            do paths.push_back(game + L"\\GLOBAL\\" + globalFind.cFileName);
+            while (::FindNextFileW(global, &globalFind));
+            ::FindClose(global);
+        }
+    }
+
     for (const std::wstring& path : paths) {
         if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
 
         auto file = std::make_unique<FileMap>();
         if (!file->Open(path)) continue;
+        const bool lzc = IsWorld() && file->Size() >= 4 &&
+                         file->Span().read<u32>(0) == 0x66113388;
+        // NFS World's GLOBAL folder mixes TPKs with other bin files; a pack
+        // starts with the 0xB3300000 id.
+        if (!lzc && IsWorld() &&
+            (file->Size() < 8 || file->Span().read<u32>(0) != kChunkTexturePack))
+            continue;
+
+        ByteSpan data = file->Span();
+        if (lzc) {
+            std::vector<u8> unpacked;
+            if (!LzcDecompress(file->Span(), unpacked)) {
+                LOG_WARN("global .lzc %S did not decompress", path.c_str());
+                continue;
+            }
+            globalData_.push_back(std::move(unpacked));
+            data = { globalData_.back().data(), globalData_.back().size() };
+            LOG_INFO("global .lzc %S: %zu bytes, first id %08X", path.c_str(), data.size,
+                     data.read<u32>(0));
+        }
 
         size_t packs = 0;
-        ChunkReader top(file->Span(), 0);
-        Chunk chunk;
-        while (top.Next(chunk)) {
-            if (chunk.id != kChunkTexturePack) continue;
+        const auto parsePack = [&](const Chunk& chunk) {
             auto pack = std::make_unique<TexturePack>();
-            if (pack->Parse(chunk)) { globalPacks_.push_back(std::move(pack)); ++packs; }
+            bool parsed = IsWorld() ? pack->ParseNfsw(chunk) : pack->Parse(chunk);
+            if (!parsed && IsWorld()) parsed = pack->Parse(chunk);
+            if (parsed) {
+                if (IsWorld()) RegisterNfswAnimations(*pack);
+                globalPacks_.push_back(std::move(pack));
+                ++packs;
+            }
+        };
+        if (lzc) {
+            // The .lzc payload is a global database, not a chunk container of
+            // its own; the TPKs sit inside it. Scan for their 0xB3300000 header.
+            for (size_t at = 0; at + 8 <= data.size; at += 4) {
+                if (data.read<u32>(at) != kChunkTexturePack) continue;
+                const u32 size = data.read<u32>(at + 4);
+                if (size < 8 || (u64)at + 8 + size > data.size) continue;
+                Chunk chunk;
+                chunk.id = kChunkTexturePack;
+                chunk.headerOffset = at;
+                chunk.dataOffset = at + 8;
+                chunk.raw = ByteSpan{ data.data + at + 8, size };
+                chunk.data = chunk.raw;
+                parsePack(chunk);
+            }
+        } else {
+            ChunkReader top(data, 0);
+            Chunk chunk;
+            while (top.Next(chunk)) {
+                if (chunk.id == kChunkTexturePack) parsePack(chunk);
+            }
         }
         LOG_INFO("global textures: %zu packs from %S", packs, path.c_str());
-        globalFiles_.push_back(std::move(file));
+        if (!lzc) globalFiles_.push_back(std::move(file));
     }
 }
 

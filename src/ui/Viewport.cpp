@@ -5,6 +5,7 @@
 
 #include <windowsx.h>
 
+#include <algorithm>
 #include <cstring>
 
 namespace {
@@ -106,7 +107,9 @@ LRESULT Viewport::Handle(UINT message, WPARAM wParam, LPARAM lParam) {
     // its own (looking round, moving something).
     ui_.HandleMessage(window_, message, wParam, lParam);
     if (message == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT && ui_.WantsMouse()) return TRUE;
-    const bool busy = looking_ || Transforming() || GizmoDragging();
+    const bool toolDrag = std::any_of(tools_.begin(), tools_.end(),
+                                     [](const ViewportTool* tool) { return tool->DraggingPointer(); });
+    const bool busy = looking_ || Transforming() || GizmoDragging() || toolDrag;
     if (!busy && ui_.WantsMouse()) {
         switch (message) {
             case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
@@ -243,6 +246,8 @@ LRESULT Viewport::Handle(UINT message, WPARAM wParam, LPARAM lParam) {
 
         case WM_CAPTURECHANGED:
             if (GizmoDragging() && (HWND)lParam != window_) EndGizmoDrag(true);
+            if (toolDrag && (HWND)lParam != window_ && (::GetKeyState(VK_LBUTTON) & 0x8000))
+                for (ViewportTool* tool : tools_) tool->CancelPointerDrag();
             break;
 
         case WM_KEYDOWN:
@@ -273,6 +278,8 @@ LRESULT Viewport::Handle(UINT message, WPARAM wParam, LPARAM lParam) {
             // forget everything rather than keep moving.
             std::memset(keys_, 0, sizeof(keys_));
             EndLook();
+            if (toolDrag)
+                for (ViewportTool* tool : tools_) tool->CancelPointerDrag();
             return 0;
 
         case WM_GETDLGCODE:
@@ -492,6 +499,7 @@ void Viewport::PickAt(int x, int y, bool add, bool wholePack) {
 
 void Viewport::SetWorld(nfs::World* world) {
     world_ = world;
+    pivotModel_ = nullptr;
     renderer_.Clear();
     if (!world_) return;
     renderer_.SyncWithWorld(*world_);
@@ -503,6 +511,7 @@ void Viewport::SetWorld(nfs::World* world) {
 
 void Viewport::RefreshWorld() {
     if (!world_) return;
+    pivotModel_ = nullptr;
     renderer_.SyncWithWorld(*world_);
 
     // Written on every load when asked for, because the moment it is worth
@@ -592,6 +601,10 @@ size_t Viewport::DetachNatives(bool remember) {
         placed.modelName = scenery.infos[instance.infoIndex].name;
         placed.transform = instance.transform;
         placed.flags = (u16)instance.flags;
+        placed.originalSection = section->info->number;
+        placed.originalSceneryNumber = instance.sceneryNumber;
+        placed.originalRecord = instance.record;
+        placed.smackable = world_->SmackablePlacement(*section, (size_t)picked.native);
         placed.infoTemplate = scenery.infos[instance.infoIndex].raw;
         if (const nfs::SolidObject* model = world_->FindModel(placed.modelHash)) {
             placed.modelBounds = model->bounds;
@@ -668,6 +681,28 @@ std::vector<std::pair<u32, int>> Viewport::SelectedPlacements() const {
     return out;
 }
 
+Vec3 Viewport::ObjectPivot(const nfs::SolidObject* model) const {
+    if (!world_->IsWorld() || !model || !model->bounds.Valid()) return {};
+    if (model == pivotModel_) return modelPivot_;
+
+    nfs::PlacedInstance local;
+    local.modelHash = model->hash;
+    local.transform = Mat4::Identity();
+    const auto road = world_->RoadPlacementAnchor(local);
+    modelPivot_ = road.value_or(model->bounds.Center());
+    if (!road && !model->IsTerrain()) modelPivot_.z = model->bounds.min.z;
+    pivotModel_ = model;
+    return modelPivot_;
+}
+
+namespace {
+void SetPivotPosition(Mat4& transform, const Vec3& position) {
+    transform.m[3][0] = position.x;
+    transform.m[3][1] = position.y;
+    transform.m[3][2] = position.z;
+}
+}
+
 bool Viewport::BeginTransform(TransformMode mode) {
     if (!world_) return false;
     moving_.clear();
@@ -686,9 +721,9 @@ bool Viewport::BeginTransform(TransformMode mode) {
                                                          : SelectedPlacements()) {
         const nfs::LoadedSection* loaded = world_->MutableLoaded(section);
         if (!loaded || (size_t)placement >= loaded->placements.size()) continue;
-        const Mat4& start = loaded->placements[(size_t)placement].instance.transform;
-        moving_.push_back({ section, placement, start });
-        sum += Vec3{ start.m[3][0], start.m[3][1], start.m[3][2] };
+        const auto& item = loaded->placements[(size_t)placement].instance;
+        moving_.push_back({ section, placement, item.transform });
+        sum += item.transform.TransformPoint(ObjectPivot(world_->FindModel(item.modelHash)));
     }
     if (moving_.empty() && !movingPoint_) {
         CancelDetach();
@@ -821,8 +856,9 @@ void Viewport::RehomePlacements(std::vector<std::pair<u32, int>> placements) {
     for (const auto& [section, placement] : placements) {
         const nfs::LoadedSection* from = world_->MutableLoaded(section);
         if (!from || placement < 0 || (size_t)placement >= from->placements.size()) continue;
-        const Mat4& t = from->placements[(size_t)placement].instance.transform;
-        const size_t target = world_->SectionForPlacement({ t.m[3][0], t.m[3][1], t.m[3][2] });
+        const auto& item = from->placements[(size_t)placement].instance;
+        const Vec3 anchor = world_->RoadPlacementAnchor(item).value_or(item.transform.TransformPoint({}));
+        const size_t target = world_->SectionForPlacement(anchor);
         if (target == SIZE_MAX || target == section) staying.push_back({ section, placement });
         else moves.push_back({ section, placement, target });
     }
@@ -849,13 +885,14 @@ void Viewport::RehomePlacements(std::vector<std::pair<u32, int>> placements) {
         const u32 hash = placed.instance.modelHash;
         const size_t home = world_->ModelHome(hash);
         const bool library = home < world_->Loaded().size() && world_->IsLibrary(*world_->Loaded()[home]);
-        if (!library && !to->HoldsModel(hash)) to->importedModels.push_back(hash);
+        const bool copyModel = !world_->IsWorld() && !library && !to->HoldsModel(hash);
+        if (copyModel) to->importedModels.push_back(hash);
         placed.sceneryNumber = to->info->number;
         to->placements.push_back(placed);
         to->placementsChanged = true;
         selected.push_back({ (u32)target, (int)to->placements.size() - 1 });
         LOG_INFO("placement of %s moved to section %s%s", placed.instance.modelName.c_str(),
-                 to->info->name.c_str(), library ? "" : " (its model is copied there)");
+                 to->info->name.c_str(), copyModel ? " (its model is copied there)" : "");
     }
 
     renderer_.RebuildInstances(*world_);
@@ -901,13 +938,16 @@ bool Viewport::GizmoTarget(u32& section, int& placement, Mat4& transform) const 
         const auto& selection = renderer_.Selection();
         if (selection.size() != 1 || !selection.front().IsNative()) return false;
         transform = selection.front().transform;
+        SetPivotPosition(transform, transform.TransformPoint(ObjectPivot(selection.front().object)));
         section = selection.front().loadedSection;
         placement = kGizmoNative;
         return true;
     }
     const nfs::LoadedSection* loaded = world_->Loaded()[section].get();
     if (placement < 0 || (size_t)placement >= loaded->placements.size()) return false;
-    transform = loaded->placements[(size_t)placement].instance.transform;
+    const auto& item = loaded->placements[(size_t)placement].instance;
+    transform = item.transform;
+    SetPivotPosition(transform, transform.TransformPoint(ObjectPivot(world_->FindModel(item.modelHash))));
     return true;
 }
 
@@ -957,19 +997,22 @@ bool Viewport::BeginGizmoDrag(int x, int y) {
         (gizmoMode_ == GizmoMode::Scale || (gizmoMode_ == GizmoMode::Rotate && handle != 2)))
         return false;
 
-    if (placement == kGizmoNative) {
-        // Grabbed: it becomes a placement now, which is what gets dragged.
-        detached_.clear();
-        if (!DetachNatives(true) || !SelectedPlacement(section, placement)) return false;
-        transform = world_->Loaded()[section]->placements[(size_t)placement].instance.transform;
-    }
-
     const Ray ray = RayAt(x, y);
     gizmoAxisStart_ = 0.0f;
     if (gizmoMode_ == GizmoMode::Move) {
         if (handle == kGizmoCentre ? !OnGround(ray, origin.z, gizmoPlaneStart_)
                                    : !ClosestOnAxis(origin, GizmoAxis(handle), ray, gizmoAxisStart_))
             return false;
+    }
+    if (placement == kGizmoNative) {
+        detached_.clear();
+        if (!DetachNatives(true) || !SelectedPlacement(section, placement)) return false;
+    }
+    gizmoLocalPivot_ = {};
+    if (placement >= 0) {
+        const auto& item = world_->Loaded()[section]->placements[(size_t)placement].instance;
+        transform = item.transform;
+        gizmoLocalPivot_ = ObjectPivot(world_->FindModel(item.modelHash));
     }
     gizmoActive_ = handle;
     gizmoSection_ = section;
@@ -983,7 +1026,8 @@ bool Viewport::BeginGizmoDrag(int x, int y) {
 
 void Viewport::UpdateGizmoDrag(int x, int y) {
     if (gizmoActive_ == kGizmoNone || !world_) return;
-    const Vec3 origin{ gizmoStart_.m[3][0], gizmoStart_.m[3][1], gizmoStart_.m[3][2] };
+    const Vec3 origin = gizmoStart_.TransformPoint(gizmoLocalPivot_);
+    Vec3 pivot = origin;
     Mat4 transform = gizmoStart_;
 
     if (gizmoMode_ == GizmoMode::Move) {
@@ -1003,9 +1047,7 @@ void Viewport::UpdateGizmoDrag(int x, int y) {
             if (!ClosestOnAxis(origin, GizmoAxis(gizmoActive_), ray, t)) return;
             position = origin + GizmoAxis(gizmoActive_) * (t - gizmoAxisStart_);
         }
-        transform.m[3][0] = position.x;
-        transform.m[3][1] = position.y;
-        transform.m[3][2] = position.z;
+        pivot = position;
     } else {
         const GizmoView view = CurrentGizmoView();
         Vec2 centre;
@@ -1042,6 +1084,7 @@ void Viewport::UpdateGizmoDrag(int x, int y) {
                                            r.z * change.m[2][column];
         }
     }
+    SetPivotPosition(transform, pivot - transform.TransformDirection(gizmoLocalPivot_));
     if (gizmoPlacement_ == kGizmoPoint) {
         if (pointSet_) pointSet_({ transform.m[3][0], transform.m[3][1], transform.m[3][2] },
                                  PointHeading(transform), false);

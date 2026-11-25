@@ -20,6 +20,8 @@
 #include "render/CollisionMesh.h"
 #include "render/RenderExtension.h"
 #include "roads/RoadBake.h"
+#include "roads/NfswRoadBake.h"
+#include "roads/NfswRoadTemplate.h"
 #include "roads/RoadNetwork.h"
 #include "roads/Prefabs.h"
 #include "ui/ProgressWindow.h"
@@ -78,6 +80,7 @@ struct RoadsAccess {
     void UpdateProperties() const { w.UpdateProperties(); }
     bool ViewCentre(Vec3& point) const { return w.ViewCentrePoint(point); }
     bool ConfirmUnsaved() const { return w.ConfirmUnsavedPlacements(); }
+    bool ActivateTool(const EditorExtension* owner) const { return w.ActivateViewportTool(owner); }
     void ImportObj(const std::wstring& path, const Vec3& origin) const { w.ImportObj(path, true, &origin); }
     void ImportEdited(const std::wstring& path) const { w.ImportObj(path, true, nullptr); }
     CollisionTools* Collision() const { return w.collisionTools_; }
@@ -144,6 +147,7 @@ constexpr int ID_ROAD_EXTRUDE_RIGHT = ID_ROADS_FIRST + 52;
 constexpr int ID_ROAD_TRIM_LEFT     = ID_ROADS_FIRST + 53;   // the outermost band taken off
 constexpr int ID_ROAD_TRIM_RIGHT    = ID_ROADS_FIRST + 54;
 constexpr int ID_ROAD_TUNNEL        = ID_ROADS_FIRST + 81;   // the road tool with the Tunnel type
+constexpr int ID_ROAD_WORLD_TEXTURES = ID_ROADS_FIRST + 82;
 constexpr int ID_ROAD_WATER         = ID_ROADS_FIRST + 80;   // the water tool (61..79 left to the others)
 constexpr int ID_ROAD_FILL          = ID_ROADS_FIRST + 55;   // ground between roads that close an area
 constexpr int ID_ROAD_GROUND_PATCH  = ID_ROADS_FIRST + 59;   // the ground beside roads made sculptable terrain
@@ -452,6 +456,7 @@ public:
 
     bool UndoLatest() override {
         if (undo_.empty()) return false;
+        CancelPen();
         if (!undo_.back().filesBackup.empty()) {
             // A bake: its files go back first, then the region is read again.
             const UndoState& step = undo_.back();
@@ -472,6 +477,7 @@ public:
         DropBackup(state);
         const std::wstring label = state.label;
         network_ = std::move(state.network);
+        if (drawFrom_ && !network_.FindNode(drawFrom_)) EndDrawChain();
         terrain_ = std::move(state.terrain);
         ground_ = std::move(state.ground);
         fitted_ = std::move(state.fitted);
@@ -748,9 +754,33 @@ public:
         outline_.clear();
     }
     bool ToolDigit(int digit) override {
-        // The road tool's modes are 1..5; 1..3 would otherwise go to the gizmo.
+        // While drawing, 1..3 go to road modes before the viewport gizmo.
         if (!drawTool_) return false;
         return DrawToolKey((WPARAM)('0' + digit));
+    }
+
+    bool ToolShortcut(WPARAM key, bool repeat) override {
+        if (!drawTool_) return false;
+        switch (key) {
+            case VK_ESCAPE:
+                if (!repeat) {
+                    if (pen_) CancelPen();
+                    else if (drawHasControl_) drawHasControl_ = false;
+                    else if (drawFrom_ || drawPending_) EndDrawChain();
+                    else CloseDrawTool();
+                }
+                return true;
+            case VK_RETURN:
+                if (!repeat) EndDrawChain();
+                return true;
+            case VK_TAB:
+            case 'G':
+            case 'R':
+                // Mesh editing or a grab here would steal the next road click.
+                return true;
+            default:
+                return DrawToolKey(key);
+        }
     }
 
     bool OnCommand(int id) override {
@@ -772,6 +802,17 @@ public:
             case ID_ROAD_AUTO_HEADING: AutoHeading(); return true;
             case ID_ROAD_BAKE:         Bake(); return true;
             case ID_ROAD_UNBAKE:       Unbake(); return true;
+            case ID_ROAD_WORLD_TEXTURES:
+                if (app_.World() && app_.World()->IsWorld()) {
+                    network_.SetWorldRoadTextures(!network_.WorldRoadTextures());
+                    SaveNetwork();
+                    Commit(L"road surface textures");
+                    app_.Edits().RefreshExtra();
+                    app_.Status(network_.WorldRoadTextures()
+                        ? L"World road textures enabled. Bake roads (Ctrl+Shift+B) to apply in game."
+                        : L"World road textures disabled. Bake roads (Ctrl+Shift+B) to apply in game.");
+                }
+                return true;
             case ID_TERRAIN_NEW:       NewTerrain(); return true;
             case ID_TERRAIN_OUTLINE:   StartOutline(); return true;
             case ID_TERRAIN_ALONG:     TerrainAlongRoad(); return true;
@@ -837,10 +878,13 @@ public:
                 graphView_ = !graphView_;
                 graphBuilt_ = 0;
                 app_.UpdateMenuChecks();
-                app_.Status(graphView_ ? L"Road graph shown: white routes (yellow: the nearest), green the ones the "
-                                         L"editor adds; blue lanes forward, orange backward, red the road's edges; "
-                                         L"links green (all), purple (GPS and racers only), grey (closed); click a node"
-                                       : L"Road graph hidden");
+                if (graphView_ && app_.World() && app_.World()->IsWorld())
+                    app_.Status(L"Road graph shown: white lines are the game's native road network");
+                else
+                    app_.Status(graphView_ ? L"Road graph shown: white routes (yellow: the nearest), green the ones the "
+                                             L"editor adds; blue lanes forward, orange backward, red the road's edges; "
+                                             L"links green (all), purple (GPS and racers only), grey (closed); click a node"
+                                           : L"Road graph hidden");
                 return true;
             case ID_GROUND_FIT:
                 fitGround_ = !fitGround_;
@@ -865,6 +909,10 @@ public:
     }
 
     void UpdateMenuChecks(HMENU menu) override {
+        const bool worldTexturesAvailable = app_.World() && app_.World()->IsWorld();
+        ::EnableMenuItem(menu, ID_ROAD_WORLD_TEXTURES, MF_BYCOMMAND | (worldTexturesAvailable ? MF_ENABLED : MF_GRAYED));
+        ::CheckMenuItem(menu, ID_ROAD_WORLD_TEXTURES, MF_BYCOMMAND |
+            (worldTexturesAvailable && network_.WorldRoadTextures() ? MF_CHECKED : MF_UNCHECKED));
         ::CheckMenuItem(menu, ID_VIEW_ROADS, MF_BYCOMMAND | (visible_ ? MF_CHECKED : MF_UNCHECKED));
         ::CheckMenuItem(menu, ID_VIEW_ROAD_GRAPH, MF_BYCOMMAND | (graphView_ ? MF_CHECKED : MF_UNCHECKED));
         ::CheckMenuItem(menu, ID_ROAD_DRAW, MF_BYCOMMAND | (drawTool_ ? MF_CHECKED : MF_UNCHECKED));
@@ -884,6 +932,11 @@ public:
         nfs::World* world = app_.World();
         if (!world) return;
         network_.Load(NetworkPath());
+        if (world->IsWorld()) {
+            for (const auto& segment : network_.Segments())
+                roads::ApplyWorldRoadSurface(*world, network_.FindSegment(segment.id)->profile);
+            network_.SetDirty();
+        }
         terrain_.Load(TerrainPath());
         terrainBuilt_ = 0;
         ground_.Load(GroundPath());
@@ -901,6 +954,12 @@ public:
             CityDemo(*world);
         }
         if (world->Region() != historyRegion_) {
+            drawMode_ = world->IsWorld() ? kDrawPen : kDrawStraight;
+            if (world->IsWorld() || roads::IsWorldLaneTexture(lastProfile_.laneCentre) ||
+                !lastProfile_.surfaceBands.empty()) {
+                lastProfile_ = roads::RoadProfile{};
+                roads::ApplyWorldRoadMaterials(*world, roads::WorldRoadType::TwoLane, lastProfile_);
+            }
             historyRegion_ = world->Region();
             ResetHistory();
         } else {
@@ -909,6 +968,7 @@ public:
     }
 
     void OnRegionClosed() override {
+        EndDrawChain();
         nativeOriginal_.clear();
         nativeLit_.clear();
         nativeWritten_.clear();
@@ -1057,7 +1117,7 @@ public:
     }
 
     // Any surface under the cursor: a patch, the game's ground, the world.
-    bool AnythingUnder(int x, int y, Vec3& point) const {
+    bool AnythingUnder(int x, int y, Vec3& point, std::optional<float> fallbackZ = {}) const {
         u32 patch = 0;
         if (TerrainUnder(x, y, patch, point)) return true;
         const Ray ray = app_.View().RayAt(x, y);
@@ -1067,7 +1127,7 @@ public:
             return true;
         }
         // Nothing: the plane of the last point drawn, or of the view centre.
-        const float z = !outline_.empty() ? outline_.back().z : brushPoint_.z;
+        const float z = fallbackZ.value_or(!outline_.empty() ? outline_.back().z : brushPoint_.z);
         if (std::fabs(ray.direction.z) < 1e-4f) return false;
         const float t = (z - ray.origin.z) / ray.direction.z;
         if (t <= 0.0f) return false;
@@ -1158,11 +1218,22 @@ public:
     }
 
     bool MouseUp(int x, int y, WPARAM keys) override {
-        (void)x; (void)y; (void)keys;
+        (void)keys;
+        if (pen_) {
+            UpdatePen(x, y);
+            const PenGesture gesture = *pen_;
+            CancelPen();
+            CommitDrawHit(gesture.hit, gesture.handle);
+            drawHover_ = DrawToolHit(x, y);
+            return true;
+        }
         if (wizard_ == kWizardOff) return false;
         wizardPainting_ = false;
         return true;
     }
+
+    bool DraggingPointer() const override { return pen_.has_value(); }
+    void CancelPointerDrag() override { CancelPen(); }
 
     void MouseMove(int x, int y) override {
         cursorX_ = x;
@@ -1177,8 +1248,12 @@ public:
             return;
         }
         if (drawTool_) {
+            if (pen_) {
+                UpdatePen(x, y);
+                return;
+            }
             drawHover_ = DrawToolHit(x, y);
-            drawHoverRoad_ = drawMode_ >= kDrawUpgrade ? RoadUnder(x, y) : 0;
+            drawHoverRoad_ = DrawChangesExistingRoad() ? RoadUnder(x, y) : 0;
             return;
         }
         if (drawing_) {
@@ -1196,7 +1271,6 @@ public:
     }
 
     bool KeyDown(WPARAM key, bool repeat) override {
-        (void)repeat;
         if (wizard_ != kWizardOff && WizardKey(key)) return true;
         if (gridTool_ && GridToolKey(key)) return true;
         if (waterTool_ && WaterToolKey(key)) return true;
@@ -1207,18 +1281,8 @@ public:
             if (key == VK_OEM_4) { treeRadius_ = std::max(1.0f, treeRadius_ / 1.2f); return true; }   // [
             if (key == VK_OEM_6) { treeRadius_ = std::min(200.0f, treeRadius_ * 1.2f); return true; } // ]
         }
-        if (drawTool_ && DrawToolKey(key)) return true;
-        if (drawTool_) {
-            if (key == VK_ESCAPE) {
-                if (drawFrom_ || drawPending_) EndDrawChain();
-                else CloseDrawTool();
-                return true;
-            }
-            if (key == VK_RETURN) {
-                EndDrawChain();
-                return true;
-            }
-        }
+        if (::GetKeyState(VK_CONTROL) >= 0 && ::GetKeyState(VK_MENU) >= 0 &&
+            ToolShortcut(key, repeat)) return true;
         if (drawing_) {
             if (key == VK_ESCAPE) {
                 drawing_ = false;
@@ -2101,7 +2165,7 @@ private:
         };
         // The bake's own version: raised when what a bake writes changes
         // (2: ground collision faces up; 3: loose road ends join the game's routes; 4: lane slots as the game fills them; 5: dead ends marked; 6: pieces kept in sections loaded all along them), so the next start bakes again.
-        mix("bake 12");
+        mix(app_.World() && app_.World()->IsWorld() ? "World bake 1" : "bake 12");
         for (const std::wstring& path : { NetworkPath(), TerrainPath() }) {
             std::ifstream in(path, std::ios::binary);
             mix(in ? std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()) : std::string());
@@ -2224,15 +2288,17 @@ private:
 
     // A new node a road's length ahead of `from`, joined to it and selected,
     // for the gizmo to put where it belongs.
-    void Pull(u32 from) {
+    void Pull(u32 from, const roads::RoadProfile* startingProfile = nullptr, const Vec3* heading = nullptr) {
         const roads::Node* origin = network_.FindNode(from);
         if (!origin) return;
-        const roads::RoadProfile profile = ProfileAt(from);
+        const roads::RoadProfile profile = startingProfile ? *startingProfile : ProfileAt(from);
 
         // Straight on from a road end; otherwise the way the camera looks.
         Vec3 direction{};
         const std::vector<u32> around = network_.SegmentsAt(from);
-        if (around.size() == 1) {
+        if (heading) {
+            direction = *heading;
+        } else if (around.size() == 1) {
             const roads::Segment& s = *network_.FindSegment(around.front());
             const roads::Curve curve = network_.CurveOf(s);
             direction = HorizontalDirection(s.a == from ? curve.Tangent(0.0f) * -1.0f : curve.Tangent(1.0f));
@@ -2625,6 +2691,56 @@ private:
         app_.Status(Fmt(L"Nodes %u and %u joined by road %u (Ctrl+Z takes it back)", a, b, madeId));
     }
 
+    bool ExtendWorldRoad() {
+        const auto* world = app_.World();
+        const auto& selection = app_.Renderer().Selection();
+        if (!world || !world->IsWorld() || selection.size() != 1) return false;
+        const PickResult& picked = selection.front();
+        if (!picked.object || !picked.IsNative() || !picked.object->HasNfswRoadSurface() ||
+            (!picked.object->IsTerrain() && picked.object->name.find("_CHOP_") == std::string::npos)) return false;
+
+        nfs::PlacedInstance placement;
+        placement.modelHash = picked.object->hash;
+        placement.transform = picked.transform;
+        Vec3 point = world->RoadPlacementAnchor(placement).value_or(picked.worldBounds.Center());
+        Vec3 centre;
+        if (app_.ViewCentre(centre) && centre.x >= picked.worldBounds.min.x && centre.x <= picked.worldBounds.max.x &&
+            centre.y >= picked.worldBounds.min.y && centre.y <= picked.worldBounds.max.y &&
+            centre.z >= picked.worldBounds.min.z - 1 && centre.z <= picked.worldBounds.max.z + 1) point = centre;
+        const auto end = nfs::NfswFindRoadEnd(world->LayoutBytes(), point, picked.worldBounds,
+                                             HorizontalDirection(app_.View().GetCamera().Forward()));
+        if (!end) {
+            app_.Status(L"No compatible World traffic node on this road near the view centre.");
+            return true;
+        }
+        roads::RoadProfile profile;
+        profile.lanesForward = end->forward;
+        profile.lanesBackward = end->backward;
+        profile.laneWidth = end->laneWidth;
+        profile.medianType = end->medianWidth > 0.2f ? 1 : 0;
+        profile.medianWidth = end->medianWidth;
+        profile.worldLaneProfile = end->nativeProfile;
+        profile.shoulderWidth = std::max(end->leftShoulder, end->rightShoulder);
+        profile.shoulderType = profile.shoulderWidth > 0.15f ? 2 : 0;
+        profile.shoulderSides = end->leftShoulder < 0.15f ? 2 : end->rightShoulder < 0.15f ? 1 : 0;
+        const auto type = profile.Lanes() > 3 ? roads::WorldRoadType::Highway : roads::WorldRoadType::TwoLane;
+        roads::ApplyWorldRoadMaterials(*world, type, profile);
+        if (profile.medianType && world->FindTexture(TextureHash("TRN_PAVA_YDIAL_01_D")))
+            profile.medianTexture = "TRN_PAVA_YDIAL_01_D";
+        for (const auto& material : picked.object->materials) {
+            if (!material.nfswRoadSurface || material.textureIndex >= picked.object->textureHashes.size()) continue;
+            const auto* texture = world->FindTexture(picked.object->textureHashes[material.textureIndex]);
+            if (!texture || !roads::IsWorldLaneTexture(texture->name)) continue;
+            if (texture->name.find("_YL_") != std::string::npos) profile.laneCentre = texture->name;
+            if (texture->name.find("_WD_") != std::string::npos) profile.laneInner = texture->name;
+        }
+        if (!app_.ActivateTool(this)) return true;
+        visible_ = true;
+        const u32 from = network_.AddNode(end->position);
+        Pull(from, &profile, &end->heading);
+        return true;
+    }
+
     void Extend() {
         u32 from = 0;
         if (const roads::Node* node = SelectedNode()) {
@@ -2637,7 +2753,8 @@ private:
             from = (app_.ViewCentre(centre) && Length(a->position - centre) < Length(b->position - centre)) ? s->a
                                                                                                          : s->b;
         } else {
-            app_.Status(L"Select a road node first (or Roads > New Road at View Centre)");
+            if (ExtendWorldRoad()) return;
+            app_.Status(L"Select a road node or road surface first (or Roads > New Road at View Centre)");
             return;
         }
         Pull(from);
@@ -2991,11 +3108,20 @@ private:
         BuildFaceRemainder();
         const std::vector<roads::MeshPiece> pieces = network_.BuildMesh(&poles_);
         PreviewFlares();
+        const auto* world = app_.World();
+        std::unordered_map<u32, u32> worldTextures;
         for (const roads::MeshPiece& piece : pieces) {
             for (const roads::MeshGroup& group : piece.groups) {
                 if (group.vertices.empty() || group.vertices.size() > 65535) continue;
                 DrawBatch batch;
                 batch.texture = TextureHash(group.texture);
+                if (world && world->IsWorld()) {
+                    auto [texture, inserted] = worldTextures.try_emplace(batch.texture, 0);
+                    if (inserted)
+                        texture->second = roads::ResolveWorldRoadTexture(*world, group.texture, batch.texture,
+                                                                        network_.WorldRoadTextures());
+                    if (texture->second) batch.texture = texture->second;
+                }
                 batch.owner = piece.segment ? piece.segment : piece.node;
                 batch.vertices.reserve(group.vertices.size());
                 for (const roads::MeshVertex& v : group.vertices) {
@@ -3159,7 +3285,8 @@ private:
         };
         for (const auto& [uses, name] : all) {
             if (!uses) continue;
-            if (name.rfind("RDP_", 0) == 0) lanes_.push_back(Widen(name));
+            if (name.rfind("RDP_", 0) == 0 || (world.IsWorld() && roads::IsWorldLaneTexture(name)))
+                lanes_.push_back(Widen(name));
             if (has(name, { "SIDEWALK", "PAVE", "CONCRET", "CURB", "GRAVEL" })) walks_.push_back(Widen(name));
             if (has(name, { "WALL", "BARRIER", "CONCRET", "FENCE", "BRICK" })) walls_.push_back(Widen(name));
         }
@@ -3334,16 +3461,23 @@ private:
             app_.Message(L"Open a region first.");
             return;
         }
+        if (!app_.ActivateTool(this)) return;
         if (wizard_ != kWizardOff) EndFaceWizard(nullptr);
         visible_ = true;
         SetBrush(terrain::Brush::None);
         drawing_ = false;
         const bool wasOpen = drawTool_;
+        if (!wasOpen) {
+            if (!from) app_.Renderer().ClearSelection();
+            app_.Renderer().SetCollisionSelectionList({});
+        }
         if (gridTool_) CloseGridTool();
         lightTool_ = treeTool_ = propTool_ = false;
         waterTool_ = false;
         if (brush_ != terrain::Brush::None) SetBrush(terrain::Brush::None);
         drawTool_ = true;
+        CancelPen();
+        penFromHandle_ = {};
         drawFrom_ = from;
         drawPending_ = false;
         drawHasControl_ = false;
@@ -3358,11 +3492,14 @@ private:
         }
         ::SetFocus(app_.View().Handle());
         app_.UpdateMenuChecks();
-        app_.Status(L"Drawing roads: click open ground for nodes, a node to join it, a road to put a node in it. "
-                    L"Enter ends the road, Esc closes the tool.");
+        app_.Status(drawMode_ == kDrawPen ? L"Road pen: click to add a node, drag to set its curve handle. Enter finishes."
+            : L"Drawing roads: click open ground for nodes, a node to join it, a road to put a node in it. "
+              L"Enter ends the road, Esc closes the tool.");
     }
 
     void EndDrawChain() {
+        CancelPen();
+        penFromHandle_ = {};
         drawFrom_ = 0;
         drawPending_ = false;
         drawHasControl_ = false;
@@ -3384,6 +3521,32 @@ private:
         float t = 0.0f;
         Vec3 point;
     };
+    struct PenGesture {
+        DrawHit hit;
+        Vec2 press;
+        Vec3 handle;
+    };
+
+    void CancelPen() {
+        if (!pen_) return;
+        pen_.reset();
+        if (::GetCapture() == app_.View().Handle()) ::ReleaseCapture();
+    }
+
+    void UpdatePen(int x, int y) {
+        const float dx = x - pen_->press.x, dy = y - pen_->press.y;
+        pen_->handle = {};
+        if (dx * dx + dy * dy < 16.0f) return;
+        const Ray ray = app_.View().RayAt(x, y);
+        const Ray pressed = app_.View().RayAt((int)pen_->press.x, (int)pen_->press.y);
+        if (std::abs(ray.direction.z) < 1e-4f || std::abs(pressed.direction.z) < 1e-4f) return;
+        const float height = pen_->hit.point.z;
+        const float t = (height - ray.origin.z) / ray.direction.z;
+        const float t0 = (height - pressed.origin.z) / pressed.direction.z;
+        if (t <= 0.0f || t0 <= 0.0f) return;
+        const Vec3 offset = (ray.origin + ray.direction * t) - (pressed.origin + pressed.direction * t0);
+        pen_->handle = { offset.x, offset.y, 0.0f };
+    }
 
     DrawHit DrawHitAt(int x, int y) const {
         DrawHit hit;
@@ -3430,7 +3593,10 @@ private:
             }
         }
         Vec3 ground;
-        if (AnythingUnder(x, y, ground)) {
+        Vec3 start;
+        const std::optional<float> fallback = drawMode_ == kDrawPen && DrawStart(start)
+            ? std::optional<float>(start.z - drawElevation_) : std::nullopt;
+        if (AnythingUnder(x, y, ground, fallback)) {
             hit.kind = DrawHit::Ground;
             hit.point = ground;
         }
@@ -3448,15 +3614,26 @@ private:
     // degrees from the road before and its length to steps of 8 m; + and -
     // raise and lower what is drawn, and a road high enough is a bridge.
 
-    enum DrawMode { kDrawStraight = 0, kDrawCurved, kDrawFreeform, kDrawUpgrade, kDrawBulldoze, kDrawModes };
+    enum DrawMode { kDrawStraight = 0, kDrawCurved, kDrawFreeform, kDrawUpgrade, kDrawBulldoze, kDrawPen, kDrawModes };
+
+    int DrawModeCount() const { return app_.World() && app_.World()->IsWorld() ? kDrawModes : kDrawPen; }
+    bool DrawChangesExistingRoad() const { return drawMode_ == kDrawUpgrade || drawMode_ == kDrawBulldoze; }
+    void SetDrawMode(int mode) {
+        if (drawMode_ == mode) return;
+        CancelPen();
+        drawMode_ = mode;
+        drawHasControl_ = false;
+        penFromHandle_ = {};
+    }
 
     static const char* DrawModeName(int mode) {
-        static const char* const names[kDrawModes] = { "Straight", "Curved", "Freeform", "Upgrade", "Bulldoze" };
+        static const char* const names[kDrawModes] = { "Straight", "Curved", "Freeform", "Upgrade", "Bulldoze", "Pen" };
         return names[std::clamp(mode, 0, kDrawModes - 1)];
     }
 
     // The road types offered, from the last profile's textures and lights.
     static constexpr int kPresets = 7;
+    static_assert(kPresets == (int)roads::WorldRoadType::Count);
     static const char* PresetName(int k) {
         static const char* const names[kPresets] = { "Two-lane street", "Four-lane road", "Avenue",
                                                      "Six-lane avenue", "One-way street", "Highway",
@@ -3466,6 +3643,9 @@ private:
 
     roads::RoadProfile PresetProfile(int k) const {
         roads::RoadProfile p = lastProfile_;
+        p.surfaceTemplate.clear();
+        p.surfaceBands.clear();
+        p.worldLaneProfile = -1;
         p.bridge = false;
         p.wallLeft = p.wallRight = false;
         p.shoulderType = 0;
@@ -3501,6 +3681,12 @@ private:
                 p.poleModel.clear();
                 p.tunnel = true;
                 break;
+        }
+        if (const auto* world = app_.World(); world && world->IsWorld()) {
+            const auto type = (roads::WorldRoadType)std::clamp(k, 0, kPresets - 1);
+            p.tunnel = type == roads::WorldRoadType::Tunnel;
+            if (type != roads::WorldRoadType::Highway) p.speedLimit = 60.0f;
+            roads::ApplyWorldRoadMaterials(*world, type, p);
         }
         return p;
     }
@@ -3558,8 +3744,12 @@ private:
     // The hit under the cursor as the tool would take it.
     DrawHit DrawToolHit(int x, int y) const {
         DrawHit hit = DrawHitAt(x, y);
-        if (drawMode_ >= kDrawUpgrade) return hit;
+        if (DrawChangesExistingRoad()) return hit;
         if (hit.kind == DrawHit::Ground) {
+            if (drawMode_ == kDrawPen) {
+                hit.point.z += drawElevation_;
+                return hit;
+            }
             Vec3 start;
             const bool started = DrawStart(start);
             if (drawMode_ == kDrawCurved && started && drawHasControl_) hit.point = TakeGround(hit.point, &drawControl_);
@@ -3576,7 +3766,7 @@ private:
         roads::Curve curve;
     };
 
-    PlannedRoad PlanRoad(const Vec3& start, const Vec3& end) const {
+    PlannedRoad PlanRoad(const Vec3& start, const Vec3& end, const Vec3& penEndHandle = {}) const {
         PlannedRoad plan;
         const Vec3 chord{ end.x - start.x, end.y - start.y, 0.0f };
         const float length = std::sqrt(chord.x * chord.x + chord.y * chord.y);
@@ -3584,7 +3774,18 @@ private:
         Vec3 leaveA = c, leaveB = c * -1.0f;
         float hA = length / 3.0f, hB = length / 3.0f;
         plan.shape = 1;
-        if (drawMode_ == kDrawCurved && drawHasControl_) {
+        if (drawMode_ == kDrawPen) {
+            const auto curve = roads::PenCurve(start, end, penFromHandle_, penEndHandle);
+            const Vec3 a{ curve.p1.x - start.x, curve.p1.y - start.y, 0 };
+            const Vec3 b{ curve.p2.x - end.x, curve.p2.y - end.y, 0 };
+            if (Length(penFromHandle_) >= 0.01f || Length(penEndHandle) >= 0.01f) {
+                plan.shape = 2;
+                hA = Length(a);
+                hB = Length(b);
+                leaveA = hA > 1e-5f ? a * (1.0f / hA) : c;
+                leaveB = hB > 1e-5f ? b * (1.0f / hB) : c * -1.0f;
+            }
+        } else if (drawMode_ == kDrawCurved && drawHasControl_) {
             // A quadratic curve through the control point, as a cubic.
             const Vec3 toA{ drawControl_.x - start.x, drawControl_.y - start.y, 0.0f };
             const Vec3 toB{ drawControl_.x - end.x, drawControl_.y - end.y, 0.0f };
@@ -3626,7 +3827,10 @@ private:
     }
 
     // The road being drawn, from the last node (or the first click) to `to`.
-    bool DrawRoadTo(u32 to) {
+    bool DrawRoadTo(u32 to, const Vec3& penEndHandle = {}) {
+        Vec3 start;
+        const roads::Node* target = network_.FindNode(to);
+        if (!target || !DrawStart(start) || FlatDistance(target->position, start) < 0.1f) return false;
         if (drawPending_) {
             const u32 start = network_.AddNode(drawStart_);
             drawPending_ = false;
@@ -3640,7 +3844,7 @@ private:
         const roads::Node* a = network_.FindNode(drawFrom_);
         const roads::Node* b = network_.FindNode(to);
         if (!a || !b) return false;
-        const PlannedRoad plan = PlanRoad(a->position, b->position);
+        const PlannedRoad plan = PlanRoad(a->position, b->position, penEndHandle);
         roads::RoadProfile profile = drawProfile_;
         if (drawElevation_ >= 4.0f && !profile.bridge) {
             profile.bridge = true;            // high enough to be a bridge
@@ -3715,6 +3919,19 @@ private:
         }
 
         const DrawHit hit = DrawToolHit(x, y);
+        if (drawMode_ == kDrawPen) {
+            CancelPen();
+            if (hit.kind != DrawHit::None) {
+                pen_ = PenGesture{ hit, { (float)x, (float)y }, {} };
+                drawHover_ = hit;
+                ::SetCapture(app_.View().Handle());
+            }
+            return true;
+        }
+        return CommitDrawHit(hit);
+    }
+
+    bool CommitDrawHit(const DrawHit& hit, const Vec3& penEndHandle = {}) {
         const bool drawingRoad = drawFrom_ || drawPending_;
         // Curved: the second click is where the curve bends towards.
         if (drawMode_ == kDrawCurved && drawingRoad && !drawHasControl_ && hit.kind != DrawHit::None) {
@@ -3728,10 +3945,12 @@ private:
                 if (!drawingRoad) {
                     // Start from it, with the profile of a road it has.
                     StartDrawTool(hit.node);
+                    penFromHandle_ = penEndHandle;
                     Select((int)hit.node);
                     return true;
                 }
-                if (DrawRoadTo(hit.node)) {
+                if (DrawRoadTo(hit.node, penEndHandle)) {
+                    penFromHandle_ = penEndHandle;
                     Changed(true);
                     app_.Status(Fmt(L"Joined to node %u -- go on from it, or Enter to end the road", hit.node));
                 }
@@ -3742,12 +3961,13 @@ private:
                 const u32 middle = network_.SplitSegment(hit.segment, hit.t);
                 if (!middle) return true;
                 if (drawingRoad) {
-                    DrawRoadTo(middle);
+                    DrawRoadTo(middle, penEndHandle);
                     EndDrawChain();
                     app_.Status(Fmt(L"A node put in road %u and the new road joined to it", hit.segment));
                 } else {
                     drawFrom_ = middle;    // and on from it, if the next click is elsewhere
                     drawLastValid_ = false;
+                    penFromHandle_ = penEndHandle;
                     app_.Status(Fmt(L"A node put in road %u: click on to draw a road out of it, Enter to stop",
                                     hit.segment));
                 }
@@ -3760,13 +3980,18 @@ private:
                     drawPending_ = true;
                     drawStart_ = hit.point;
                     drawLastValid_ = false;
+                    penFromHandle_ = penEndHandle;
                     app_.Status(drawMode_ == kDrawCurved ? L"Road started: click where its curve bends towards"
                                                          : L"Road started: click where it goes next");
                     return true;
                 }
                 const u32 node = network_.AddNode(hit.point);
-                DrawRoadTo(node);
+                if (!DrawRoadTo(node, penEndHandle)) {
+                    network_.RemoveNode(node);
+                    return true;
+                }
                 drawFrom_ = node;
+                penFromHandle_ = penEndHandle;
                 Changed(true);
                 Select((int)node);
                 return true;
@@ -3776,15 +4001,13 @@ private:
     }
 
     bool DrawToolKey(WPARAM key) {
-        if (key >= '1' && key < '1' + kDrawModes) {
-            drawMode_ = (int)(key - '1');
-            drawHasControl_ = false;
+        if (key >= '1' && key < (WPARAM)('1' + DrawModeCount())) {
+            SetDrawMode((int)(key - '1'));
             return true;
         }
         const bool coarse = ::GetKeyState(VK_SHIFT) < 0;
         if (key == VK_OEM_PLUS || key == VK_ADD) { drawElevation_ = std::min(60.0f, drawElevation_ + (coarse ? 5.0f : 1.0f)); return true; }
         if (key == VK_OEM_MINUS || key == VK_SUBTRACT) { drawElevation_ = std::max(-20.0f, drawElevation_ - (coarse ? 5.0f : 1.0f)); return true; }
-        if (key == VK_ESCAPE && drawHasControl_) { drawHasControl_ = false; return true; }
         if (key == VK_BACK && drawHasControl_) { drawHasControl_ = false; return true; }
         return false;
     }
@@ -3792,9 +4015,10 @@ private:
     // What the road being drawn would be, for the overlay and the panel.
     bool DrawPreview(PlannedRoad& plan) const {
         Vec3 start;
-        if (drawMode_ >= kDrawUpgrade || !DrawStart(start) || drawHover_.kind == DrawHit::None) return false;
+        if (DrawChangesExistingRoad() || !DrawStart(start) || drawHover_.kind == DrawHit::None ||
+            FlatDistance(start, drawHover_.point) < 0.1f) return false;
         if (drawMode_ == kDrawCurved && !drawHasControl_) return false;
-        plan = PlanRoad(start, drawHover_.point);
+        plan = PlanRoad(start, drawHover_.point, pen_ ? pen_->handle : Vec3{});
         return true;
     }
 
@@ -3815,13 +4039,13 @@ private:
             ImGui::TextDisabled("%d+%d lanes, %.1f wide", drawProfile_.lanesForward, drawProfile_.lanesBackward,
                                 drawProfile_.HalfWidth() * 2.0f);
             ImGui::Separator();
-            for (int m = 0; m < kDrawModes; ++m) {
+            for (int m = 0; m < DrawModeCount(); ++m) {
                 if (m) ImGui::SameLine();
                 char label[48];
                 std::snprintf(label, sizeof(label), "%s (%d)", DrawModeName(m), m + 1);
                 const bool on = drawMode_ == m;
                 if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-                if (ImGui::Button(label)) { drawMode_ = m; drawHasControl_ = false; }
+                if (ImGui::Button(label)) SetDrawMode(m);
                 if (on) ImGui::PopStyleColor();
             }
             ImGui::TextUnformatted("Type:");
@@ -3829,10 +4053,12 @@ private:
                 ImGui::SameLine();
                 if (ImGui::SmallButton(PresetName(k))) drawProfile_ = PresetProfile(k);
             }
-            ImGui::Checkbox("Snap angle (15\xC2\xB0)", &drawSnapAngle_);
-            ImGui::SameLine();
-            ImGui::Checkbox("Snap length (8 m)", &drawSnapLength_);
-            ImGui::SameLine();
+            if (drawMode_ != kDrawPen) {
+                ImGui::Checkbox("Snap angle (15\xC2\xB0)", &drawSnapAngle_);
+                ImGui::SameLine();
+                ImGui::Checkbox("Snap length (8 m)", &drawSnapLength_);
+                ImGui::SameLine();
+            }
             ImGui::SetNextItemWidth(110.0f);
             ImGui::DragFloat("Elevation (+/-)", &drawElevation_, 0.25f, -20.0f, 60.0f, "%.1f m");
             {
@@ -3903,6 +4129,9 @@ private:
             PlannedRoad plan;
             const bool drawingRoad = drawFrom_ || drawPending_;
             switch (drawMode_) {
+                case kDrawPen:
+                    ImGui::TextUnformatted("Click for a corner. Drag from a node to set its curve handle.");
+                    break;
                 case kDrawUpgrade:
                     ImGui::TextUnformatted("Click a road to give it the chosen type (its zoning stays).");
                     break;
@@ -6857,6 +7086,27 @@ private:
         nfs::World* world = app_.World();
         if (!world) return;
         if (graphBuilt_ == network_.Revision() && graphRegion_ == world->Region()) return;
+        if (world->IsWorld()) {
+            // The game's roads live in the layout. A served copy already
+            // carries the baked additions, so the view reads that first.
+            nativeRoads_ = {};
+            nativeRoadsValid_ = false;
+            graph_ = nfs::routes::Graph{};
+            ourRoutes_.clear();
+            std::vector<u8> served;
+            bool readServed = false;
+            std::ifstream in(world->OverlayFolder() + L"\\files\\TRACKS\\" + world->Region() + L".BUN",
+                             std::ios::binary);
+            if (in) {
+                served.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+                readServed = true;
+            }
+            graphRegion_ = world->Region();
+            graphBuilt_ = network_.Revision();
+            nativeRoadsValid_ = nfs::NfswReadNativeRoads(
+                readServed ? ByteSpan{served.data(), served.size()} : world->LayoutBytes(), nativeRoads_);
+            return;
+        }
         if (graphRegion_ != world->Region() || graphShipped_.empty()) {
             graphShipped_.clear();
             std::ifstream in(nfs::ShippedTrackFile(app_.GameFolder(), world->Region(), L"ROUTES" + world->Region() + L"\\RoutesFreeRoam.bin"),
@@ -6905,12 +7155,15 @@ private:
     }
 
     void DrawRouteGraph(IDirect3DDevice9* device, const Camera& camera, WorldRenderer& renderer);
+    void DrawWorldRoadGraph(IDirect3DDevice9* device, const Camera& camera, WorldRenderer& renderer);
 
     bool BakeGroundCollision(size_t& moved);
     bool BakeGroundModels(size_t& moved, std::wstring& error);
 
     void Bake();
     void Unbake();
+    void BakeWorld();
+    void UnbakeWorld();
     bool RemoveBaked(size_t& removed);
     bool BakeCollision(const std::vector<roads::MeshPiece>& pieces, size_t& added, size_t& removed);
 
@@ -7339,6 +7592,7 @@ private:
         ::AppendMenuW(roadsMenu, MF_STRING, ID_ROAD_FILL, L"&Fill Ground Between Roads That Close an Area");
         ::AppendMenuW(roadsMenu, MF_SEPARATOR, 0, nullptr);
         ::AppendMenuW(roadsMenu, MF_STRING, ID_VIEW_ROADS, L"Show &Roads (procedural)");
+        ::AppendMenuW(roadsMenu, MF_STRING, ID_ROAD_WORLD_TEXTURES, L"Use &World Road Textures");
         ::AppendMenuW(roadsMenu, MF_STRING, ID_VIEW_ROAD_GRAPH, L"Show the Road &Graph (traffic and GPS)");
         ::AppendMenuW(roadsMenu, MF_SEPARATOR, 0, nullptr);
         ::AppendMenuW(roadsMenu, MF_STRING, ID_ROAD_BAKE, L"&Bake Roads, Buildings, Lights and Trees into the Game\tCtrl+Shift+B");
@@ -7416,6 +7670,8 @@ private:
     std::vector<u8> graphShipped_;
     nfs::routes::Graph graph_;
     std::set<u16> ourRoutes_;
+    nfs::NfswNativeRoads nativeRoads_;
+    bool nativeRoadsValid_ = false;
     std::vector<UndoState> undo_;
     UndoState settled_;
     bool historyReady_ = false;
@@ -7493,6 +7749,8 @@ private:
     Vec3  drawControl_;                  // curved: the point the curve bends towards
     bool  drawHasControl_ = false;
     Vec3  drawLast_;                     // the direction the last road arrived with
+    std::optional<PenGesture> pen_;
+    Vec3 penFromHandle_;
     bool  drawLastValid_ = false;
     u32   drawHoverRoad_ = 0;            // upgrade / bulldoze: the road under the cursor
     int   wizard_ = 0;                 // WizardStep
@@ -7814,6 +8072,9 @@ void RoadsExtension::FillRoad(PropertiesPanel::View& view, const roads::Segment&
     view.actions.push_back({ L"Draw roads", ID_ROAD_DRAW, L"Roads", L"The road drawing tool (Ctrl+Shift+D)." });
     const std::vector<std::wstring> yesNo = { L"yes", L"no" };
     AddRow(view, L"Road", L"Length", Number(SegmentLength(*s)), L"Along the curve.", 0);
+    if (!p.surfaceTemplate.empty())
+        AddRow(view, L"Road", L"World road template", Widen(p.surfaceTemplate),
+               L"The original mesh sampled for this road's surface and texture coordinates.", 0);
     {
         const wchar_t* const shapes[3] = { L"auto", L"straight", L"drawn" };
         AddRow(view, L"Road", L"Curve", shapes[std::clamp(s->shape, 0, 2)],
@@ -7829,12 +8090,14 @@ void RoadsExtension::FillRoad(PropertiesPanel::View& view, const roads::Segment&
     AddRow(view, L"Lanes", L"Taper length", Number(p.taperLength),
            L"Where this road meets one with fewer lanes at a node, its extra lanes narrow away over this length.",
            kTaperLength);
-    AddRow(view, L"Lanes", L"Centre lane texture", Widen(p.laneCentre),
-           L"The lane beside the centre line. The game's lane textures carry their marking on the left edge.",
-           kLaneCentre, lanes_, true);
-    AddRow(view, L"Lanes", L"Other lanes texture", Widen(p.laneInner), L"Every other lane.", kLaneInner, lanes_, true);
-    AddRow(view, L"Lanes", L"Texture length", Number(p.textureLength),
-           L"How much road one repeat of a lane texture covers.", kTextureLength);
+    if (p.surfaceBands.empty()) {
+        AddRow(view, L"Lanes", L"Centre lane texture", Widen(p.laneCentre),
+               L"The lane beside the centre line. The game's lane textures carry their marking on the left edge.",
+               kLaneCentre, lanes_, true);
+        AddRow(view, L"Lanes", L"Other lanes texture", Widen(p.laneInner), L"Every other lane.", kLaneInner, lanes_, true);
+        AddRow(view, L"Lanes", L"Texture length", Number(p.textureLength),
+               L"How much road one repeat of a lane texture covers.", kTextureLength);
+    }
     AddRow(view, L"Lanes", L"Cat's eyes", p.catsEyes ? L"yes" : L"no",
            L"Road studs on the yellow line, wherever it is painted: down the middle, along each edge of a median, "
            L"or the left edge of a one-way road.", kCatsEyes, yesNo);
@@ -8404,8 +8667,39 @@ void RoadsExtension::ApplyRoad(roads::RoadProfile& p, int only) {
     if (readText(kWallRight, text)) p.wallRight = !text.empty() && (text[0] == L'y' || text[0] == L'Y');
 }
 
+void RoadsExtension::DrawWorldRoadGraph(IDirect3DDevice9* device, const Camera& camera, WorldRenderer& renderer) {
+    struct Vertex { float x, y, z; D3DCOLOR colour; };
+    std::vector<Vertex> lines;
+    const auto line = [&](float x0, float y0, float z0, float x1, float y1, float z1, D3DCOLOR c) {
+        lines.push_back({ x0, y0, z0, c });
+        lines.push_back({ x1, y1, z1, c });
+    };
+    const Vec3 eye = camera.Position();
+    const float reach = 700.0f;
+    const float lift = 0.6f;
+    // The native road network: one white centre line per segment.
+    for (const auto& road : nativeRoads_.segments) {
+        const Vec3& a = road[0];
+        const Vec3& b = road[1];
+        if ((std::fabs(a.x - eye.x) > reach && std::fabs(b.x - eye.x) > reach) ||
+            (std::fabs(a.y - eye.y) > reach && std::fabs(b.y - eye.y) > reach)) continue;
+        line(a.x, a.y, a.z + lift, b.x, b.y, b.z + lift, 0xFFF0F0F0);
+    }
+    if (lines.empty()) return;
+    renderer.BeginOverlay(device);
+    device->SetRenderState(D3DRS_ZENABLE, FALSE);
+    device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    const size_t batch = 60000;
+    for (size_t at = 0; at < lines.size(); at += batch) {
+        const size_t count = std::min(batch, lines.size() - at);
+        device->DrawPrimitiveUP(D3DPT_LINELIST, (UINT)(count / 2), lines.data() + at, sizeof(Vertex));
+    }
+    renderer.EndOverlay(device);
+}
+
 void RoadsExtension::DrawRouteGraph(IDirect3DDevice9* device, const Camera& camera, WorldRenderer& renderer) {
     RefreshGraph();
+    if (app_.World() && app_.World()->IsWorld()) return DrawWorldRoadGraph(device, camera, renderer);
     struct Vertex { float x, y, z; D3DCOLOR colour; };
     std::vector<Vertex> lines;
     const auto line = [&](float x0, float y0, float z0, float x1, float y1, float z1, D3DCOLOR c) {
@@ -8654,11 +8948,16 @@ void RoadsExtension::DrawOverlay(IDirect3DDevice9* device, const Camera& camera,
             line(c, at, 0x80FFFFFF);
             line(c, c + Vec3{ 0, 0, 3.0f }, 0xFFFFFFFF);
         }
+        if (pen_ && Length(pen_->handle) >= 0.01f) {
+            const Vec3 tangent = pen_->handle;
+            line(at - tangent, at + tangent, 0xFFFF70FF);
+            line(at + tangent, at + tangent + Vec3{ 0, 0, 2 }, 0xFFFF70FF);
+        }
         if (drawElevation_ != 0.0f)
             line(at, at - Vec3{ 0, 0, drawElevation_ }, 0xFF80C0FF);   // down to the ground
     }
     // Upgrade / bulldoze: the road that a click would change.
-    if (drawTool_ && drawMode_ >= kDrawUpgrade)
+    if (drawTool_ && DrawChangesExistingRoad())
         if (const roads::Segment* s = network_.FindSegment(drawHoverRoad_)) {
             const roads::Curve curve = network_.CurveOf(*s);
             const D3DCOLOR c = drawMode_ == kDrawBulldoze ? 0xFFFF4040 : 0xFF40E0FF;
@@ -9780,9 +10079,65 @@ bool RoadsExtension::BakeCollision(const std::vector<roads::MeshPiece>& pieces, 
     return true;
 }
 
+void RoadsExtension::BakeWorld() {
+    if (!network_.Nodes().empty() && !network_.Save(NetworkPath())) {
+        app_.Message(L"The World road source could not be saved.", MB_ICONWARNING);
+        return;
+    }
+    DiskStep step(this, L"bake the World roads");
+    ProgressWindow progress(app_.Window(), L"Baking World roads", 3);
+    progress.Step(L"Reading the previous road bake...");
+    std::wstring error;
+    roads::WorldRoadBake previous;
+    if (!roads::RemoveWorldRoadBake(*app_.World(), previous, error)) {
+        app_.Message(error, MB_ICONWARNING);
+        return;
+    }
+    // A placement save can update the overlay on disk while keeping the
+    // previous section cached in the viewport. Bake against the disk version.
+    app_.ReopenRegionKeepingView();
+    auto* world = app_.World();
+    if (!world) return;
+
+    progress.Step(L"Building World road meshes, collision and AI routes...");
+    std::vector<NfswMeshOverlay> files;
+    nfs::NfswRoadBuildReport routes;
+    const bool empty = network_.Segments().empty();
+    const bool planned = empty || PlanWorldRoadBake(*world, network_, files, routes, error);
+    progress.Step(L"Writing World section overlays...");
+    if (!planned || (!empty && !roads::InstallWorldRoadBake(*world, files, error))) {
+        if (!previous.installed.empty()) {
+            std::wstring replayError;
+            if (roads::ReplayWorldRoadBake(*world, previous, replayError)) app_.ReopenRegionKeepingView();
+            else error += L"\n" + replayError;
+        }
+        app_.Message(error, MB_ICONWARNING);
+        return;
+    }
+    if (!empty) app_.ReopenRegionKeepingView();
+    WriteBakeStamp();
+    app_.Status(empty ? L"World road overlays removed." :
+        Fmt(L"World roads saved to %zu overlays: %zu AI road segments, %zu connections to the original network. Restart World to load them.",
+            files.size(), routes.segments, routes.stockJoins));
+}
+
+void RoadsExtension::UnbakeWorld() {
+    DiskStep step(this, L"remove the baked World roads");
+    roads::WorldRoadBake previous;
+    std::wstring error;
+    if (!roads::RemoveWorldRoadBake(*app_.World(), previous, error)) {
+        app_.Message(error, MB_ICONWARNING);
+        return;
+    }
+    if (!previous.installed.empty()) app_.ReopenRegionKeepingView();
+    WriteBakeStamp();
+    app_.Status(L"World road overlays removed. The authored roads are still in the editor.");
+}
+
 void RoadsExtension::Unbake() {
     if (!app_.World()) return;
     if (!app_.ConfirmUnsaved()) return;
+    if (app_.World() && app_.World()->IsWorld()) { UnbakeWorld(); return; }
     DiskStep step(this, L"remove the baked roads");
     size_t collisionAdded = 0, collisionRemoved = 0, polesAdded = 0, polesRemoved = 0;
     if (!BakePoles({}, polesAdded, polesRemoved) ||
@@ -9816,6 +10171,7 @@ void RoadsExtension::Bake() {
     if (!app_.ConfirmUnsaved()) return;
     nfs::World* world = app_.World();
     if (!world) return;
+    if (world->IsWorld()) { BakeWorld(); return; }
     SaveNetwork();
     const std::wstring region = world->Region();
     // Ctrl+Z takes the whole bake back: the world's files as they are now.

@@ -190,4 +190,29 @@ bool EaDecompress(ByteSpan block, std::vector<u8>& out) {
     return false;
 }
 
+bool LzcBlocksDecompress(ByteSpan blocks, std::vector<u8>& out, size_t expected) {
+    out.clear();
+    if (expected) out.reserve(expected);
+    size_t at = 0;
+    while (at + 24 <= blocks.size && (!expected || out.size() < expected)) {
+        const u32 id     = blocks.read<u32>(at);
+        const u32 stored = blocks.read<u32>(at + 8);
+        if (id != 0x55441122 || stored < 40 || at + stored > blocks.size) return false;
+        std::vector<u8> block;
+        if (!EaDecompress({ blocks.data + at + 24, stored - 24 }, block)) return false;
+        out.insert(out.end(), block.begin(), block.end());
+        at += stored;
+    }
+    return !out.empty() && (!expected || out.size() >= expected);
+}
+
+bool LzcDecompress(ByteSpan file, std::vector<u8>& out) {
+    out.clear();
+    if (file.size < 0x10 || file.read<u32>(0) != 0x66113388) return false;
+    const u32 expected = file.read<u32>(4);
+    if (!LzcBlocksDecompress({ file.data + 0x10, file.size - 0x10 }, out, expected)) return false;
+    out.resize(expected);
+    return true;
+}
+
 } // namespace nfs

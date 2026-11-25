@@ -2,6 +2,7 @@
 
 #include "core/Math.h"
 #include "core/Types.h"
+#include "io/NfswPlacementWrite.h"
 #include "io/SectionEdits.h"
 #include "io/SectionSplice.h"
 
@@ -41,6 +42,12 @@ struct ImportPlan {
     };
 
     std::vector<Mesh> meshes;
+
+    // World edits replace whole separate section files.
+    bool worldMeshImport = false;
+    size_t worldMeshesChanged = 0;
+    size_t worldVerticesChanged = 0;
+    std::vector<NfswMeshOverlay> worldMeshOverlays;
 
     // A span of the game's files that has to read differently.
     //
@@ -92,7 +99,7 @@ struct ImportPlan {
     std::wstring report;        // one line per thing left alone
     std::wstring rebuiltReport; // one line per mesh whose section was rebuilt
 
-    bool Empty() const { return meshes.empty() && spans.empty() && sectionSpans.empty(); }
+    bool Empty() const { return meshes.empty() && spans.empty() && sectionSpans.empty() && worldMeshOverlays.empty(); }
 };
 
 struct ImportSummary {
@@ -100,6 +107,7 @@ struct ImportSummary {
     size_t verticesWritten = 0;
     size_t objectsCreated  = 0;
     std::wstring modelsFolder;
+    std::wstring error;
 };
 
 // Works out what would be written. Needs the region open, and touches no files.

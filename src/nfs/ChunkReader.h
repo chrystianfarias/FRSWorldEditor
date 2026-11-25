@@ -47,6 +47,10 @@ public:
     // to be contiguous.
     void SetSkipZeroPadding(bool enabled) { skipZeroPadding_ = enabled; }
 
+    // Overrides PayloadAlignment() for every child of this reader. NFS World
+    // aligns vertex buffers to 16, where UG2 uses 128.
+    void SetAlignment(u32 alignment) { alignmentOverride_ = alignment; }
+
     u64 Position() const { return position_; }
 
 private:
@@ -54,6 +58,7 @@ private:
     u64      fileOffset_      = 0;
     u64      position_        = 0;
     bool     skipZeroPadding_ = true;
+    u32      alignmentOverride_ = 0;
 };
 
 // Returns the first child of `container` with the given id. The returned chunk

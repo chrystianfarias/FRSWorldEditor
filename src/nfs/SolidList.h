@@ -4,6 +4,7 @@
 #include "core/Types.h"
 #include "nfs/ChunkReader.h"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -36,10 +37,11 @@ enum class ObjectKind : u8 {
     Terrain,    // TRN_: the roads and ground of a section, already in world space
     Prop,       // buildings, signs, street furniture, placed by their own matrix
     Backdrop,   // SKYDOME and the PAN_ panorama pieces
+    Shadow,     // SHD_/SHDW_/RFL_/REFL_/REF_/SHADOW: engine shadow/reflection proxies
 };
 
 // Decides the kind from the object name, which is how the artists tagged them.
-ObjectKind ClassifyObject(const std::string& name);
+ObjectKind ClassifyObject(const std::string& name, bool nfsw = false);
 
 // A contiguous run of the index buffer drawn with one texture.
 struct SolidMaterial {
@@ -51,6 +53,9 @@ struct SolidMaterial {
     // (sub_5C58A0): 0x01 WORLDBONE, 0x40 WORLDREFLECT, 0x80 CAR, else WORLD.
     u32  stripFlags   = 0;
     Aabb bounds;             // per-material bounds as stored in the file
+    bool nfswRoadSurface = false;
+    // WorldRoadShader's diffuse, normal, height, specular and opacity slots.
+    std::array<u8, 5> nfswMapIds{ 0xff, 0xff, 0xff, 0xff, 0xff };
 };
 
 // One drawable mesh.
@@ -92,6 +97,11 @@ struct SolidObject {
 
     bool IsBackdrop() const { return kind == ObjectKind::Backdrop; }
     bool IsTerrain()  const { return kind == ObjectKind::Terrain; }
+    bool IsShadow()   const { return kind == ObjectKind::Shadow; }
+    bool HasNfswRoadSurface() const {
+        return std::any_of(materials.begin(), materials.end(),
+            [](const SolidMaterial& material) { return material.nfswRoadSurface && material.indexCount; });
+    }
 
     // World-space bounds, derived from the header bounds and the transform.
     //

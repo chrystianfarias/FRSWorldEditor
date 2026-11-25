@@ -37,6 +37,15 @@ struct RoadProfile {
     std::string laneInner  = "RDP_LANEB_WD_AA_KT";
     float textureLength    = 32.0f;   // road length one repeat of a lane texture covers
 
+    struct SurfaceBand {
+        std::string texture;
+        float left = 0, right = 0;   // fraction of the full road width, relative to its centre
+        float leftHeight = 0, rightHeight = 0;
+        Vec2 leftUv, rightUv, uvPerMetre;
+    };
+    std::string surfaceTemplate;
+    std::vector<SurfaceBand> surfaceBands;
+
     // Raised sidewalks on either edge; width 0 leaves them out.
     float sidewalkWidth   = 0.0f;
     float sidewalkHeight  = 0.2f;
@@ -219,6 +228,7 @@ struct RoadProfile {
     // every bake, joined to the game's own roads automatically.
     bool  traffic = true;
     bool  gps = true;
+    int   worldLaneProfile = -1;  // native lane profile kept when pulling a World road out
     float speedLimit = 60.0f;      // km/h
 
     int   Lanes() const { return lanesForward + lanesBackward; }
@@ -402,6 +412,10 @@ struct Curve {
     Vec3 Second(float t) const;    // the second derivative
 };
 
+// Planar pen handles point out of their nodes. The end handle is mirrored
+// to make the road arrive in the direction the pen can continue.
+Curve PenCurve(const Vec3& start, const Vec3& end, const Vec3& leaveStart, const Vec3& leaveEnd);
+
 // One vertex of generated geometry: world position, normal, texture
 // coordinate (Direct3D's V direction) and colour.
 struct MeshVertex {
@@ -455,7 +469,7 @@ class Network {
 public:
     void Clear() {
         nodes_.clear(); segments_.clear(); cuts_.clear(); gameJunctions_.clear(); faceJunctions_.clear(); lights_.clear(); props_.clear(); waters_.clear();
-        nextId_ = 1; fillBetween_ = false; terrainCollision_ = false; SetDirty();
+        nextId_ = 1; fillBetween_ = false; terrainCollision_ = false; worldRoadTextures_ = false; SetDirty();
     }
 
     const std::vector<Node>& Nodes() const { return nodes_; }
@@ -679,6 +693,9 @@ public:
     // Ground filling every area the roads close all round (optional, saved).
     bool FillBetween() const { return fillBetween_; }
     void SetFillBetween(bool on) { fillBetween_ = on; SetDirty(); }
+    bool WorldRoadTextures() const { return worldRoadTextures_; }
+    void SetWorldRoadTextures(bool on) { worldRoadTextures_ = on; SetDirty(); }
+
     // Whether the ground beside and between roads, and the terrain patches,
     // get collision when baked. Off unless asked for.
     bool TerrainCollision() const { return terrainCollision_; }
@@ -721,6 +738,7 @@ private:
     void OpenTunnelPortals(std::vector<MeshPiece>& pieces) const;
     bool fillBetween_ = false;
     bool terrainCollision_ = false;
+    bool worldRoadTextures_ = false;
     u32 nextId_ = 1;
     bool dirty_ = true;
     u64 revision_ = 1;

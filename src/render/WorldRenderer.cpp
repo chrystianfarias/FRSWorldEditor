@@ -1,13 +1,16 @@
 #include "render/WorldRenderer.h"
 
 #include "core/Log.h"
+#include "io/CollisionGenerate.h"
 #include "io/DistrictFog.h"
+#include "io/TextureImport.h"
 #include "render/RenderExtension.h"
 #include "render/GameLook.h"
 
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
@@ -35,6 +38,41 @@ double SecondsNow() {
     return (double)counter.QuadPart / (double)frequency.QuadPart;
 }
 
+// NFS World's object tracks advance by 15 * speed frames per second:
+// sub_74F520 adds 15 * controllerRate * speed * dt to the frame position, and
+// the speed byte's high nibble is in 15 fps steps (0x10 = 15, 0x20 = 30,
+// 0x40 = 60), the low nibble in single fps steps.
+constexpr double kSceneryAnimationTicksPerSecond = 15.0;
+
+// A free camera crosses the zone seams much faster than a car does, and the
+// polygons overlap with hard edges. Holding a new zone's list for half a
+// second keeps a camera on a boundary from strobing between two sets.
+constexpr double kZoneSwitchDwellSeconds = 0.5;
+
+// FNV-1a over the visible section numbers. Two lists can hold the same count
+// while naming different sections, and the zone log has to tell them apart.
+u32 HashSections(const std::vector<u32>& sections) {
+    u32 hash = 2166136261u;
+    for (u32 number : sections) {
+        hash ^= number;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+// Placements two sorted section lists have in common: how much of the picture
+// a zone switch keeps.
+size_t KeptSections(const std::vector<u32>& before, const std::vector<u32>& after) {
+    size_t kept = 0;
+    size_t i = 0, j = 0;
+    while (i < before.size() && j < after.size()) {
+        if (before[i] < after[j]) ++i;
+        else if (after[j] < before[i]) ++j;
+        else { ++kept; ++i; ++j; }
+    }
+    return kept;
+}
+
 } // namespace
 
 void WorldRenderer::Clear() {
@@ -52,7 +90,16 @@ void WorldRenderer::Clear() {
     collisionDrawn_.clear();
     uploadedSections_ = 0;
     unresolvedInstances_ = 0;
+    // The visible set names sections of the world being dropped.
+    visibleSections_.clear();
+    visibleFrom_ = {};
+    haveVisible_ = false;
+    visibleZoneId_ = 0;
+    visibleZoneChanged_ = 0.0;
     textures_.SetWorld(nullptr);
+    if (worldSkyVertices_) { worldSkyVertices_->Release(); worldSkyVertices_ = nullptr; }
+    if (worldSkyIndices_) { worldSkyIndices_->Release(); worldSkyIndices_ = nullptr; }
+    worldSkyBands_ = 0;
     minimapPreview_.Release();   // MINIMAP PREVIEW (temporary)
     world_  = nullptr;
     bounds_ = {};
@@ -69,6 +116,7 @@ void WorldRenderer::SyncWithWorld(const nfs::World& world) {
         bounds_ = {};
         world_ = &world;
         textures_.SetWorld(&world);
+        streamingModelReady_ = world.IsWorld() && streamingModel_.Parse(world.LayoutBytes());
     }
 
     // Keep a one-to-one mapping with the world's sections. A section may hold
@@ -93,9 +141,7 @@ void WorldRenderer::SyncWithWorld(const nfs::World& world) {
             target.gpu = std::move(gpu);
         }
 
-        auto collision = std::make_unique<CollisionMesh>();
-        if (collision->Upload(context_->Device(), *loaded[i], showRaceGroups_))
-            target.collision = std::move(collision);
+        RefreshCollision(i);
 
         for (const nfs::SceneryInstance& instance : loaded[i]->scenery.instances)
             target.instanceBounds.Add(instance.worldBounds);
@@ -207,6 +253,8 @@ void WorldRenderer::BuildInstances(const nfs::World& world) {
             gpuInstance.transform   = transform;
             gpuInstance.mirrored    = Determinant3x3(transform) < 0.0f;
             gpuInstance.native      = (int)n;
+            gpuInstance.guid        = instance.guid;
+            gpuInstance.sceneryNumber = instance.sceneryNumber;
             if (instance.infoIndex < scenery.infos.size()) {
                 const nfs::SceneryInfo& info = scenery.infos[instance.infoIndex];
                 gpuInstance.radius = info.radius;
@@ -288,11 +336,23 @@ void WorldRenderer::BuildInstances(const nfs::World& world) {
 void WorldRenderer::RebuildInstances(const nfs::World& world) {
     if (world_ != &world) return;
     BuildInstances(world);
+    if (world.IsWorld()) {
+        for (size_t i = 0; i < sections_.size(); ++i) {
+            const auto& section = *world.Loaded()[i];
+            if (sections_[i].hasPlacementCollision || !section.placements.empty() ||
+                !section.nfswEditedScenery.empty() ||
+                (!section.removedNatives.empty() && !section.smackableScenery.empty()) ||
+                std::any_of(section.smackableLinks.begin(), section.smackableLinks.end(),
+                    [](const auto& link) { return link.halfSizes.has_value(); }))
+                sections_[i].collisionPreviewDirty = true;
+        }
+    }
     ++hiddenVersion_;   // the per-instance flags follow the new lists
 }
 
 void WorldRenderer::UpdatePlacement(u32 loadedSection, int placement, const Mat4& transform) {
     if (loadedSection >= sections_.size()) return;
+    if (world_ && world_->IsWorld()) sections_[loadedSection].collisionPreviewDirty = true;
     for (GpuInstance& instance : sections_[loadedSection].instances) {
         if (instance.placement != placement) continue;
         const GpuSection* owner = GpuOf(instance.section);
@@ -407,6 +467,11 @@ void WorldRenderer::BindTextureStage(IDirect3DDevice9* device, const CachedTextu
 
 bool WorldRenderer::DrawObject(IDirect3DDevice9* device, const GpuObject& object,
                                RenderStats& stats, DrawPass pass) {
+    // SHD_/RFL_ meshes are the engine's shadow and reflection proxies, not
+    // world geometry; drawing them puts a second shell over the real building.
+    if (world_ && world_->IsWorld() && object.source && object.source->IsShadow() &&
+        !showProxies_)
+        return false;
     if (glActive_) return DrawObjectGameLook(device, object, stats, pass);
     const bool wantsTexture = mode_ == RenderMode::Textured || mode_ == RenderMode::Unlit;
     bool other = false;
@@ -580,27 +645,119 @@ void WorldRenderer::Render(const Camera& camera) {
         if (!haveVisible_ || moved > 4.0f) {
             // The zones do not tile the ground without gaps, and a camera that
             // steps on a seam should not empty the world for a frame. Keeping
-            // the last set until another zone claims the camera is what the
-            // game's own streaming does, and it stops the view flickering.
+            // the zone the camera is already in -- and keeping the last set
+            // when no zone claims the point -- is what the game's own streaming
+            // does, and it stops the view flickering.
+            const std::vector<u32> previous = visibleSections_;
+            const u32 previousHash = HashSections(previous);
+            // The hold/dwell rules below are the NFS World streaming behaviour;
+            // UG2 keeps its original immediate zone switch.
+            const bool holdsZone = world_->IsWorld() && visibleZoneId_ != 0 &&
+                world_->Visibility().ZoneContains(visibleZoneId_, eye.x, eye.y);
+
             std::vector<u32> found;
-            if (world_->Visibility().VisibleAt(eye, found)) {
+            int listZone = holdsZone ? (int)visibleZoneId_ : -1;
+            bool claimed = holdsZone;
+            bool fallback = false;
+            size_t zoneListCount = holdsZone ? visibleSections_.size() : 0;
+            const int modelZone = streamingModelReady_
+                ? streamingModel_.SectionAt(eye, animationClock_, world_->Visibility()) : -1;
+            if (!holdsZone) {
+                if (modelZone >= 0) {
+                    const auto* list = world_->Visibility().ListOf((u32)modelZone);
+                    if (list && !list->empty()) {
+                        found = *list;
+                        listZone = modelZone;
+                        claimed = true;
+                    }
+                }
+                if (!claimed) claimed = world_->Visibility().VisibleAt(eye, found, &listZone);
+                zoneListCount = found.size();
+                if (!claimed && gameZoneFallback_ && world_->IsWorld() && !haveVisible_) {
+                    // WhatSectionsShouldWeDraw: with no zone, the game draws the
+                    // sections whose numeric part is below 10. Only the first
+                    // list takes it: a camera crossing a seam keeps the zone it
+                    // came from instead of collapsing to the fallback set.
+                    for (const nfs::Section& section : world_->Table().Sections())
+                        if (section.number % 1000 < 10) found.push_back(section.number);
+                    fallback = !found.empty();
+                    claimed = fallback;
+                }
+            }
+            const size_t listedCount = found.size();
+            const int zone = world_->Visibility().ZoneAt(eye.x, eye.y);
+            // A second zone on the other side of a hard edge must not replace
+            // the list the moment the camera crosses: wait for the dwell so a
+            // camera hovering on the seam does not strobe between both sets.
+            const bool deferred = world_->IsWorld() && claimed && !fallback && haveVisible_ &&
+                visibleZoneId_ != 0 && (u32)listZone != visibleZoneId_ &&
+                animationClock_ - visibleZoneChanged_ < kZoneSwitchDwellSeconds;
+            if (claimed && !holdsZone && !deferred && world_->IsWorld()) {
+                // The same function appends the camera's own section, its +400
+                // sibling, and the Z0 global layer (25000) while it is loaded.
+                const int appendZone = listZone >= 0 ? listZone
+                    : (zone >= 0 ? (int)world_->Visibility().Zones()[zone].id : -1);
+                if (appendZone >= 0) {
+                    found.push_back((u32)appendZone);
+                    found.push_back((u32)appendZone + 400);
+                }
+                if (world_->Table().FindByNumber(25000)) found.push_back(25000);
+            }
+            if (claimed && !holdsZone && !deferred) {
+                std::sort(found.begin(), found.end());
+                found.erase(std::unique(found.begin(), found.end()), found.end());
                 visibleSections_.swap(found);
                 haveVisible_ = true;
+                visibleZoneId_ = fallback ? 0 : (u32)listZone;
+                visibleZoneChanged_ = animationClock_;
             }
             visibleFrom_ = eye;
 
-            // Logged on every change of zone, not every frame: which zone the
-            // camera is in decides the whole picture, and when the picture
-            // looks wrong this is the first thing worth knowing.
+            const int zoneId = (holdsZone || deferred)
+                ? (int)visibleZoneId_
+                : (zone >= 0 ? (int)world_->Visibility().Zones()[zone].id : -1);
+            const size_t appended = (!holdsZone && !deferred && claimed)
+                ? visibleSections_.size() - listedCount : 0;
+            const u32 visibleHash = HashSections(visibleSections_);
+
+            // Logged on every change of zone, list or fallback state, not every
+            // frame: which zone the camera is in decides the whole picture, and
+            // when the picture looks wrong this is the first thing worth knowing.
             static size_t lastCount = (size_t)-1;
+            static u32    lastHash = 0;
+            static int    lastZone = -2;
             static bool   lastClaimed = false;
-            if (visibleSections_.size() != lastCount || haveVisible_ != lastClaimed) {
+            static bool   lastFallback = false;
+            static bool   lastDeferred = false;
+            if (visibleSections_.size() != lastCount || visibleHash != lastHash ||
+                zoneId != lastZone || haveVisible_ != lastClaimed || fallback != lastFallback ||
+                deferred != lastDeferred) {
+                const char* mode = deferred
+                    ? "new zone deferred"
+                    : claimed
+                          ? (fallback
+                                 ? (listZone >= 0 ? "zone list empty, game fallback n%1000<10"
+                                                  : "no zone, game fallback n%1000<10")
+                                 : "inside a zone")
+                          : haveVisible_
+                                ? "no new zone, keeping the last list"
+                                : (world_->IsWorld()
+                                       ? (gameZoneFallback_ ? "no zone, game fallback n%1000<10"
+                                                            : "no zone, drawing all sections")
+                                       : "no zone, using distance");
+                LOG_INFO("camera (%.0f, %.0f, %.0f): %s, %zu sections visible "
+                         "(zoneAt %d, listZone %d/%zu, fallback %d, deferred %d, appended %zu, "
+                         "was %zu/%08X, kept %zu, now %08X, moved %.1f)",
+                         eye.x, eye.y, eye.z, mode, visibleSections_.size(),
+                         zoneId, listZone, zoneListCount, fallback ? 1 : 0, deferred ? 1 : 0,
+                         appended, previous.size(), previousHash,
+                         KeptSections(previous, visibleSections_), visibleHash, std::sqrt(moved));
                 lastCount = visibleSections_.size();
+                lastHash = visibleHash;
+                lastZone = zoneId;
                 lastClaimed = haveVisible_;
-                LOG_INFO("camera (%.0f, %.0f, %.0f): %s, %zu sections visible",
-                         eye.x, eye.y, eye.z,
-                         haveVisible_ ? "inside a zone" : "no zone claims it, using distance",
-                         visibleSections_.size());
+                lastFallback = fallback;
+                lastDeferred = deferred;
             }
         }
         usingVisibility = haveVisible_ && !visibleSections_.empty();
@@ -626,6 +783,9 @@ void WorldRenderer::Render(const Camera& camera) {
     };
 
     std::vector<size_t> collisionVisible;
+    const auto* sceneryAnimations = (world_ && world_->IsWorld() &&
+                                     !world_->SceneryAnimations().empty())
+        ? &world_->SceneryAnimations() : nullptr;
 
     for (size_t i = 0; i < sections_.size(); ++i) {
         const SectionRender& section = sections_[i];
@@ -638,13 +798,14 @@ void WorldRenderer::Render(const Camera& camera) {
 
         // Collision is culled on its own footprint: a section's instances can
         // sit far from its ground, and the section may place nothing at all.
+        if (showCollision_ && section.collisionPreviewDirty) RefreshCollision(i);
         if (showCollision_ && section.collision) {
             const Aabb& bounds = section.collision->Bounds();
             bool keep = true;
             if (usingVisibility)
                 keep = std::binary_search(visibleSections_.begin(), visibleSections_.end(),
                                           section.number);
-            else if (streaming_) {
+            else if (DistanceCulls()) {
                 const Vec3 centre = (bounds.min + bounds.max) * 0.5f;
                 const float dx = centre.x - camera.Position().x;
                 const float dy = centre.y - camera.Position().y;
@@ -667,7 +828,7 @@ void WorldRenderer::Render(const Camera& camera) {
         // Distance is measured on the ground plane: the camera is often well
         // above the street, and counting that height in would drop the
         // surrounding blocks the moment anyone looked down at the city.
-        else if (streaming_ && cullBounds.Valid()) {
+        else if (DistanceCulls() && cullBounds.Valid()) {
             const Vec3 centre = (cullBounds.min + cullBounds.max) * 0.5f;
             const float dx = centre.x - camera.Position().x;
             const float dy = centre.y - camera.Position().y;
@@ -705,10 +866,28 @@ void WorldRenderer::Render(const Camera& camera) {
         for (size_t k = 0; k < section.instances.size(); ++k) {
             const GpuInstance& instance = section.instances[k];
             if (hiddenHere[k]) continue;   // hidden in the editor
-            if (!previewed && culling_ && instance.worldBounds.Valid() &&
+            const GpuObject& object = GpuOf(instance.section)->Objects()[instance.object];
+            if (InstanceHolidayHidden(section.number, instance.native, &object)) continue;
+            // A file can embed another section's scenery chunk (chunk 6009
+            // inside STREAML5RA_6409.BUN). That chunk is only drawn when its
+            // own number is in the visible list, not the file's section.
+            if (world_ && world_->IsWorld() && usingVisibility && instance.sceneryNumber &&
+                instance.sceneryNumber != section.number &&
+                !std::binary_search(visibleSections_.begin(), visibleSections_.end(),
+                                    instance.sceneryNumber))
+                continue;
+
+            const nfs::NfswObjectAnimation* animation = nullptr;
+            if (sceneryAnimations && instance.guid) {
+                const auto found = sceneryAnimations->find(instance.guid);
+                if (found != sceneryAnimations->end() && !found->second.frames.empty())
+                    animation = &found->second;
+            }
+            // An animated instance leaves its shipped bounds, so frustum culling
+            // against them would drop it over most of the route.
+            if (!previewed && !animation && culling_ && instance.worldBounds.Valid() &&
                 !frustum.Intersects(instance.worldBounds)) continue;
 
-            const GpuObject& object = GpuOf(instance.section)->Objects()[instance.object];
             if (BackdropHidden(object)) continue;
             if (BackdropOutOfZone(object, section.number)) continue;   // Game look: not in the camera's zone list
             if (HiddenBuilding(object)) continue;   // MINIMAP PREVIEW (temporary)
@@ -718,16 +897,25 @@ void WorldRenderer::Render(const Camera& camera) {
             stats.instancesVisible++;
             bind(instance.section);
 
+            Mat4 posed = instance.transform;
+            if (animation) {
+                const size_t frame = animate_
+                    ? (size_t)(animationClock_ * kSceneryAnimationTicksPerSecond * animation->speed) %
+                          animation->frames.size()
+                    : 0;
+                posed = animation->frames[frame];
+            }
+            const Mat4 placed = previewed ? posed * preview->delta : posed;
+            const bool mirrored = animation ? Determinant3x3(placed) < 0.0f : instance.mirrored;
+
             if (backfaceCulling_)
                 device->SetRenderState(D3DRS_CULLMODE,
-                                       instance.mirrored ? OppositeCull(cullMode_)
-                                                         : cullMode_);
+                                       mirrored ? OppositeCull(cullMode_) : cullMode_);
 
-            const Mat4 placed = previewed ? instance.transform * preview->delta : instance.transform;
             const D3DMATRIX world = ToD3D(placed);
             device->SetTransform(D3DTS_WORLD, &world);
             if (DrawObject(device, object, stats))
-                QueueTranslucent(object, instance.section, placed, instance.mirrored,
+                QueueTranslucent(object, instance.section, placed, mirrored,
                                  previewed ? Transform(instance.worldBounds, preview->delta) : instance.worldBounds, eye);
         }
     }
@@ -783,10 +971,13 @@ void WorldRenderer::PickOne(const Ray& ray, const GpuObject& object, const Mat4&
                             u32 ownerSection, u32 ownerObject, PickResult& best,
                             int placement, int native) const {
     if (!object.source) return;
+    if (fromInstance && InstanceHolidayHidden(sections_[sectionIndex].number, native, &object))
+        return;
     if (placement >= 0 && placement == excludePlacement_ && sectionIndex == excludeSection_) return;
     // Pickable exactly when drawn: with the game look on, the panorama and
     // distant pieces are drawn as ordinary scenery even with the backdrop off.
     if (BackdropHidden(object)) return;
+    if (world_ && world_->IsWorld() && object.source->IsShadow() && !showProxies_) return;
     if (HiddenBuilding(object)) return;   // MINIMAP PREVIEW (temporary)
     if (HiddenModel(object)) return;
 
@@ -1225,11 +1416,14 @@ u32 WorldRenderer::AnimatedTexture(u32 hash) const {
     const auto found = animations.find(hash);
     if (found == animations.end()) return hash;
     const nfs::TextureAnimation& animation = found->second;
-    const size_t frame = (size_t)(animationClock_ * animation.fps) % animation.frames.size();
+    const size_t step = (size_t)(animationClock_ * animation.fps);
+    const size_t frame = (animation.startFrame + step) % animation.frames.size();
     return animation.frames[frame];
 }
 
 void WorldRenderer::DrawSky(IDirect3DDevice9* device, const Camera& camera, RenderStats& stats) {
+    // World's dome comes from the GLOBAL sky bands, not from a backdrop model.
+    if (world_ && world_->IsWorld()) return DrawWorldSky(device, camera, stats);
     // The dome is a backdrop model; it is drawn round the eye, so however far
     // the camera flies the sky stays as far away -- and with depth off, it is
     // behind whatever the world draws after it.
@@ -1295,6 +1489,166 @@ void WorldRenderer::DrawSky(IDirect3DDevice9* device, const Camera& camera, Rend
     }
 }
 
+// GLOBAL\SkyDomeTextures.bin holds six time-of-day sets of four photo
+// panoramas; A is the zenith band, D the horizon haze. The dome stacks the
+// bands over equal elevation steps, the same one-wrap-around layout the
+// textures are painted for. NOON until a weather look asks for another set.
+struct WorldSkyBand {
+    const char* texture;
+    float top, bottom;   // elevation, in halves of pi (1 = zenith, 0 = horizon)
+};
+constexpr WorldSkyBand kWorldSkyBands[] = {
+    // The bands stack by their pixel heights (2:2:1:1 of the dome over the
+    // horizon), so the cloud decks come down near the horizon the way the
+    // games paint them. The horizon band dips well past the horizon line:
+    // the camera is rarely at the dome's centre, and past the city's edge
+    // the game shows sky, not void.
+    { "SKY_1NOONA", 1.0f, 0.4646f },    // asin(4/6): the zenith half
+    { "SKY_1NOONB", 0.4646f, 0.2163f }, // asin(2/6)
+    { "SKY_1NOONC", 0.2163f, 0.1066f }, // asin(1/6), the sun's band
+    { "SKY_1NOOND", 0.1066f, -0.5f },   // the horizon strip, skirted below
+};
+constexpr unsigned kWorldSkySegments = 48;
+constexpr unsigned kWorldSkyRows = 10;  // quads per band
+// Each band blends this share of its own span into the one above it, so the
+// texture swap never shows as a hard arc.
+constexpr float kWorldSkyFade = 0.25f;
+
+bool WorldRenderer::BuildWorldSky() {
+    if (!context_ || !context_->IsValid()) return false;
+    IDirect3DDevice9* device = context_->Device();
+    if (!device) return false;
+
+    struct SkyVertex { float x, y, z; D3DCOLOR colour; float u, v; };
+    constexpr float kSkyPi = 3.14159265f;
+    const unsigned columns = kWorldSkySegments + 1;
+    std::vector<SkyVertex> vertices;
+    std::vector<u16> indices;
+    for (unsigned b = 0; b < std::size(kWorldSkyBands); ++b) {
+        const WorldSkyBand& band = kWorldSkyBands[b];
+        const float top = band.top * 90.0f, bottom = band.bottom * 90.0f;
+        // Row 0 of a band is its top edge, so the bands run downhill. Every
+        // band but the zenith reaches past its own top edge with a fade, and
+        // paints over the band above it.
+        const float fade = b ? std::clamp(kWorldSkyFade * (top - bottom), 2.0f, 6.0f) : 0.0f;
+        const float extent = top + fade;
+        const unsigned base = (unsigned)vertices.size();
+        for (unsigned j = 0; j <= kWorldSkyRows; ++j) {
+            const float t = (float)j / kWorldSkyRows;
+            const float elevation = extent - t * (extent - bottom);
+            const float theta = elevation * (kSkyPi / 180.0f);
+            // v measures the band's own span, so the fade rows reach past the
+            // texture's top edge, which the sampler clamp edge-stretches.
+            const float v = (elevation - bottom) / (top - bottom);
+            const float alpha = fade > 0.0f
+                ? std::clamp((extent - elevation) / fade, 0.0f, 1.0f) : 1.0f;
+            const D3DCOLOR colour = D3DCOLOR_COLORVALUE(1.0f, 1.0f, 1.0f, alpha);
+            for (unsigned k = 0; k <= kWorldSkySegments; ++k) {
+                const float phi = 2.0f * kSkyPi * (float)k / kWorldSkySegments;
+                vertices.push_back({ std::cos(phi) * std::cos(theta), std::sin(phi) * std::cos(theta),
+                                     std::sin(theta), colour, (float)k / kWorldSkySegments, v });
+            }
+        }
+        for (unsigned j = 0; j < kWorldSkyRows; ++j)
+            for (unsigned k = 0; k < kWorldSkySegments; ++k) {
+                const unsigned a = base + j * columns + k;
+                const unsigned b2 = a + columns;
+                const u16 quad[6] = { (u16)a, (u16)b2, (u16)(a + 1), (u16)(a + 1), (u16)b2, (u16)(b2 + 1) };
+                indices.insert(indices.end(), quad, quad + 6);
+            }
+    }
+
+    IDirect3DVertexBuffer9* vertices9 = nullptr;
+    IDirect3DIndexBuffer9* indices9 = nullptr;
+    if (FAILED(device->CreateVertexBuffer((UINT)(vertices.size() * sizeof(SkyVertex)), 0,
+                                          D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1,
+                                          D3DPOOL_MANAGED, &vertices9, nullptr)))
+        return false;
+    if (FAILED(device->CreateIndexBuffer((UINT)(indices.size() * sizeof(u16)), 0, D3DFMT_INDEX16,
+                                         D3DPOOL_MANAGED, &indices9, nullptr))) {
+        vertices9->Release();
+        return false;
+    }
+    void* locked = nullptr;
+    if (FAILED(vertices9->Lock(0, 0, &locked, 0))) {
+        vertices9->Release();
+        indices9->Release();
+        return false;
+    }
+    std::memcpy(locked, vertices.data(), vertices.size() * sizeof(SkyVertex));
+    vertices9->Unlock();
+    if (FAILED(indices9->Lock(0, 0, &locked, 0))) {
+        vertices9->Release();
+        indices9->Release();
+        return false;
+    }
+    std::memcpy(locked, indices.data(), indices.size() * sizeof(u16));
+    indices9->Unlock();
+
+    worldSkyVertices_ = vertices9;
+    worldSkyIndices_ = indices9;
+    worldSkyBands_ = (unsigned)std::size(kWorldSkyBands);
+    return true;
+}
+
+void WorldRenderer::DrawWorldSky(IDirect3DDevice9* device, const Camera& camera, RenderStats& stats) {
+    if (!worldSkyVertices_ && !BuildWorldSky()) return;
+    // Keep the dome round the eye and inside the far plane. The map bounds
+    // include the huge backdrop/library shells, so anchoring to them put the
+    // horizon beyond the far plane: from a car only the zenith was visible.
+    const Vec3 base = camera.Position();
+    const float radius = std::max(camera.FarPlane() * 0.90f, 1000.0f);
+    // Row-vector math: scale the unit dome first, then move it to its base.
+    const Mat4 transform = Mat4::Scale(Vec3{ radius, radius, radius }) * Mat4::Translation(base);
+
+    device->SetRenderState(D3DRS_ZENABLE, FALSE);
+    device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+    device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    // The bands fade into each other through their vertex alpha.
+    device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    const D3DMATRIX world = ToD3D(transform);
+    device->SetTransform(D3DTS_WORLD, &world);
+    device->SetStreamSource(0, worldSkyVertices_, 0, 24);
+    device->SetIndices(worldSkyIndices_);
+    device->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+    device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+    device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
+    device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+    device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+
+    const unsigned faces = kWorldSkyRows * kWorldSkySegments * 2;
+    for (unsigned band = 0; band < worldSkyBands_; ++band) {
+        const auto& texture = textures_.Get(device, TextureNameHash(kWorldSkyBands[band].texture));
+        if (!texture.texture) continue;
+        device->SetTexture(0, texture.texture);
+        device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0,
+                                     (kWorldSkyRows + 1) * (kWorldSkySegments + 1),
+                                     band * faces, faces);
+        ++stats.drawCalls;
+    }
+    // The world pass only renews its stream and world matrix per section; the
+    // FVF and the sampler addresses come from ApplyRenderStates, once per
+    // frame, so anything this pass leaves behind corrupts the whole frame.
+    device->SetTexture(0, nullptr);
+    device->SetFVF(kWorldVertexFvf);
+    device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
+    device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE2X);
+    device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    device->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+    device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TFACTOR);
+    device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    device->SetRenderState(D3DRS_ZENABLE, TRUE);
+    device->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+    device->SetRenderState(D3DRS_CULLMODE, backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+}
+
 void WorldRenderer::SetRaceGroupsVisible(bool visible) {
     if (showRaceGroups_ == visible) return;
     showRaceGroups_ = visible;
@@ -1313,11 +1667,66 @@ void WorldRenderer::RefreshCollision(size_t loadedSection) {
     if (!world_ || !context_ || loadedSection >= sections_.size() ||
         loadedSection >= world_->Loaded().size())
         return;
-    auto collision = std::make_unique<CollisionMesh>();
-    if (collision->Upload(context_->Device(), *world_->Loaded()[loadedSection], showRaceGroups_))
-        sections_[loadedSection].collision = std::move(collision);
+    const nfs::LoadedSection& section = *world_->Loaded()[loadedSection];
+    nfs::CollisionPack placed;
+    std::vector<nfs::NfswSmackableBox> editedBoxes;
+    bool boxesChanged = false;
+    if (world_->IsWorld()) {
+        placed.sectionNumber = section.info ? section.info->number : 0;
+        const auto add = [&](u32 hash, const Mat4& transform) {
+            if (const nfs::SolidObject* model = world_->FindModel(hash))
+                collision::GenerateNfswPlacementCollision(*model, transform, placed.polygons);
+        };
+        for (size_t index : section.nfswEditedScenery) {
+            if (section.smackableScenery.count(index)) continue;
+            const nfs::SceneryInstance& instance = section.scenery.instances[index];
+            const auto key = std::make_pair(instance.sceneryNumber, instance.record);
+            if (std::find(section.removedNatives.begin(), section.removedNatives.end(), key) ==
+                section.removedNatives.end())
+                add(section.scenery.ModelHash(instance), instance.transform);
+        }
+        std::set<size_t> hiddenBoxes;
+        for (const auto& [index, link] : section.smackableScenery) {
+            const size_t box = section.smackableLinks[link].box;
+            if (box == SIZE_MAX) continue;
+            const auto& source = section.scenery.instances[index];
+            const auto key = std::make_pair(source.sceneryNumber, source.record);
+            if (std::find(section.removedNatives.begin(), section.removedNatives.end(), key) !=
+                section.removedNatives.end())
+                hiddenBoxes.insert(box);
+        }
+        boxesChanged = !hiddenBoxes.empty() || std::any_of(section.smackableLinks.begin(), section.smackableLinks.end(),
+            [](const auto& link) { return link.halfSizes.has_value(); }) ||
+            std::any_of(section.placements.begin(), section.placements.end(),
+            [](const auto& placement) { return placement.instance.smackable.has_value(); });
+        if (boxesChanged) {
+            std::unordered_map<size_t, const nfs::NfswSmackableLink*> resized;
+            for (const auto& link : section.smackableLinks)
+                if (link.halfSizes) resized.emplace(link.box, &link);
+            for (size_t i = 0; i < section.smackableBoxes.size(); ++i) {
+                if (hiddenBoxes.count(i)) continue;
+                const auto shape = resized.find(i);
+                const auto& box = section.smackableBoxes[i];
+                editedBoxes.push_back(shape == resized.end() ? box : shape->second->EditedBox(box));
+            }
+        }
+        for (const auto& placement : section.placements) {
+            const auto& item = placement.instance;
+            if (item.smackable)
+                editedBoxes.push_back(item.smackable->BoxAt(item.transform));
+            else
+                add(item.modelHash, item.transform);
+        }
+    }
+    SectionRender& target = sections_[loadedSection];
+    target.hasPlacementCollision = !placed.polygons.empty() || boxesChanged;
+    target.collisionPreviewDirty = false;
+    auto mesh = std::make_unique<CollisionMesh>();
+    if (mesh->Upload(context_->Device(), section, showRaceGroups_,
+                     placed.polygons.empty() ? nullptr : &placed, boxesChanged ? &editedBoxes : nullptr))
+        target.collision = std::move(mesh);
     else
-        sections_[loadedSection].collision.reset();
+        target.collision.reset();
 }
 
 void WorldRenderer::SetCollisionSelectionList(std::vector<CollisionPick> picks) {
@@ -1398,6 +1807,8 @@ bool WorldRenderer::PickCollision(const Ray& ray, CollisionPick& out) const {
 
         const auto& packs = world_->Loaded()[index]->collision;
         for (size_t p = 0; p < packs.size(); ++p) {
+            if (world_->IsWorld() && !packs[p].edited && packs[p].bounds.Valid() &&
+                IntersectRayAabb(ray, packs[p].bounds) < 0.0f) continue;
             for (size_t i = 0; i < packs[p].polygons.size(); ++i) {
                 if (!showRaceGroups_ && packs[p].polygons[i].raceGroup != 0) continue;
                 CollisionPick candidate{ (u32)index, (u32)p, (u32)i };
@@ -1481,8 +1892,11 @@ void WorldRenderer::DrawCollisionSelection(IDirect3DDevice9* device) {
         auto push = [](std::vector<Vertex>& out, const Vec3& p, D3DCOLOR colour) {
             out.push_back({ p.x, p.y, p.z + kLift, colour });
         };
-        for (int k : { 0, 1, 2 }) push(fill, c[k], kFill);
-        if (quad) for (int k : { 0, 2, 3 }) push(fill, c[k], kFill);
+        const auto& polygon = world_->Loaded()[pick.section]->collision[pick.pack].polygons[pick.polygon];
+        if (!polygon.TallNfswBoundary()) {
+            for (int k : { 0, 1, 2 }) push(fill, c[k], kFill);
+            if (quad) for (int k : { 0, 2, 3 }) push(fill, c[k], kFill);
+        }
         const int corners = quad ? 4 : 3;
         for (int k = 0; k < corners; ++k) {
             push(lines, c[k], kOutline);
@@ -1979,6 +2393,10 @@ void ReleaseTyped(T*& object) {
 } // namespace
 
 bool WorldRenderer::BackdropHidden(const GpuObject& object) const {
+    // DrawSky owns the dome; drawing the SKYDOME mesh as well double-draws it.
+    if (world_ && world_->IsWorld() && object.source &&
+        object.source->name.rfind("SKYDOME", 0) == 0)
+        return true;
     if (object.backdropKind == kBackdropPanorama && hideBackground_) return true;
     if (object.backdropKind == kBackdropDistantLod && hideDistantLod_) return true;
     if (!object.isBackdrop || showBackdrop_) return false;
@@ -2006,6 +2424,44 @@ bool WorldRenderer::BackdropOutOfZone(const GpuObject& object, u32 sectionNumber
     if (object.backdropKind == kBackdropNone || !glActive_ || !glFogged_) return false;
     if (!glZoneFound_) return sectionNumber % 100 >= 10;
     return !std::binary_search(glZoneList_.begin(), glZoneList_.end(), sectionNumber);
+}
+
+void WorldRenderer::ApplyBaseVisibility() {
+    culling_ = true;
+    backfaceCulling_ = true;
+    showScenery_ = true;
+    showProxies_ = false;
+    showLibrary_ = false;
+    showAlternate_ = false;
+    showCollision_ = false;
+    showRaceGroups_ = false;
+    editedOnly_ = false;
+    // Race props (barriers, start lines) belong to the events that name their
+    // scenery group; free roam never shows them (EnableBarrierSceneryGroup).
+    showRaceProps_ = false;
+    animate_ = true;
+    showSky_ = true;
+    showMinimap_ = false;
+    showOriginalBuildings_ = true;
+    hiddenModels_ = nullptr;
+    gameSection_ = nullptr;
+    gameModel_ = nullptr;
+    // Presets are a reset: show the user-hidden items again.
+    hiddenKeys_.clear();
+    ++hiddenVersion_;
+}
+
+void WorldRenderer::ApplyGameStandardView() {
+    ApplyBaseVisibility();
+    showBackdrop_ = true;
+    hideBackground_ = false;
+    hideDistantLod_ = false;
+    gameZoneFallback_ = true;
+    if (world_ && !world_->Visibility().IsEmpty()) streaming_ = true;
+}
+
+bool WorldRenderer::DistanceCulls() const {
+    return streaming_ && (!world_ || !world_->IsWorld() || haveVisible_);
 }
 
 void WorldRenderer::ReleaseDeviceObjects() {
@@ -2357,7 +2813,7 @@ void WorldRenderer::RenderReflection(IDirect3DDevice9* device, const Camera& cam
         if (GameHidesSection(section.number)) continue;   // SetGameDrawFilter
         if (usingVisibility) {
             if (!std::binary_search(visibleSections_.begin(), visibleSections_.end(), section.number)) continue;
-        } else if (streaming_ && section.instanceBounds.Valid()) {
+        } else if (DistanceCulls() && section.instanceBounds.Valid()) {
             const Vec3 centre = (section.instanceBounds.min + section.instanceBounds.max) * 0.5f;
             const float dx = centre.x - eye.x, dy = centre.y - eye.y;
             if (dx * dx + dy * dy > streamRadius_ * streamRadius_) continue;
@@ -2380,6 +2836,7 @@ void WorldRenderer::RenderReflection(IDirect3DDevice9* device, const Camera& cam
             const GpuSection* gpu = sections_[instance.reflectSection].gpu.get();
             if (!gpu || instance.reflectObject >= gpu->Objects().size()) continue;
             const GpuObject& object = gpu->Objects()[instance.reflectObject];
+            if (InstanceHolidayHidden(section.number, instance.native, &object)) continue;
             if (HiddenModel(object)) continue;
             // View 4 shares the player camera, so its drawing set is the same zone list.
             if (object.backdropKind != kBackdropNone &&
@@ -2549,6 +3006,10 @@ void WorldRenderer::VisitSolidDraws(IDirect3DDevice9* device, const Aabb& bounds
             const GpuInstance& instance = section.instances[k];
             if (hiddenHere[k] || !overlaps(instance.worldBounds)) continue;
             const GpuObject& object = GpuOf(instance.section)->Objects()[instance.object];
+            if (InstanceHolidayHidden(section.number, instance.native, &object)) continue;
+            if (world_ && world_->IsWorld() && object.source && object.source->IsShadow() &&
+                !showProxies_)
+                continue;
             if (BackdropHidden(object) || HiddenBuilding(object) || HiddenModel(object) || GameHidesModel(object))
                 continue;
             for (const GpuDraw& d : object.draws) {

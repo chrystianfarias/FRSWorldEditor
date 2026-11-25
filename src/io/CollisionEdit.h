@@ -59,6 +59,7 @@ struct WallOptions {
     // centred on the points), each face's solid inside it.
     bool     bothSides = true;
     float    maxPiece  = 8.0f;   // longer segments are cut into pieces of at most this
+    float    minSpacing = 0.25f;
 };
 
 // How thick a wall that blocks from both sides is: just over the 1 m solid the
@@ -139,7 +140,9 @@ public:
 
     // Each of these reaches every copy, and returns how many polygons changed.
     size_t Remove(const std::vector<PolygonRef>& refs);
-    size_t SetSurface(const std::vector<PolygonRef>& refs, u8 surface);
+    // NFS World also carries the native surface hash a polygon writes (0 keeps
+    // whatever the polygon already has).
+    size_t SetSurface(const std::vector<PolygonRef>& refs, u8 surface, u32 nfswSurface = 0);
     size_t SetRaceGroup(const std::vector<PolygonRef>& refs, u8 group);
 
     // Moving a selection: Begin records it (copies included), Update places

@@ -30,14 +30,23 @@ struct SceneryInstance {
     u32  flags     = 0;
     u32  sceneryNumber = 0;   // the scenery chunk it came from (its header's number)
     u32  record        = 0;   // its index among that chunk's records
+    u32  guid          = 0;   // NFS World's +0x50; object animation tracks name it
     Mat4 transform;     // rotation and scale from the fixed-point matrix, plus translation
     Aabb worldBounds;   // as stored in the file: tighter than transforming the model bounds
+};
+
+// NFS World's 0x34106 entry: which 0x34108 group-table entry changes which
+// instance's visibility flags in this section.
+struct SceneryOverride {
+    u16 entry = 0;      // index into the layout's 0x34108 table
+    u32 instance = 0;   // index into this section's instances
 };
 
 // The scenery of one streaming section.
 struct Scenery {
     std::vector<SceneryInfo>     infos;
     std::vector<SceneryInstance> instances;
+    std::vector<SceneryOverride> overrides;
 
     bool Empty() const { return instances.empty(); }
 

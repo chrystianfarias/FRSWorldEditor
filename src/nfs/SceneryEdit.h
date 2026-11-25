@@ -2,7 +2,9 @@
 
 #include "core/Math.h"
 #include "core/Types.h"
+#include "nfs/NfswCollision.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +27,12 @@ namespace nfs {
 struct PlacedInstance {
     u32         modelHash = 0;
     std::string modelName;
+    // The shipped record this placement was detached from, or ~0u for a new
+    // placement. NFS World patches that record in place when the placement
+    // stays in the same section, and clones it when it crosses sections.
+    u32         originalSection = 0;        // section number of the source, 0 = new
+    u32         originalSceneryNumber = 0;  // source chunk number
+    u32         originalRecord = ~0u;
     Mat4        transform;       // rotation and scale rows, translation in row 3
     Aabb        modelBounds;     // the model's own box, for the record's world box
     u16         flags = 0;
@@ -35,6 +43,8 @@ struct PlacedInstance {
     u32             triangles = 0;
     float           radius    = 0.0f;
     std::vector<u8> infoTemplate;
+    // World clipboard copies retain their source physics after detaching from the source record.
+    std::optional<NfswSmackablePlacement> smackable;
 
     Aabb WorldBounds() const;
 };
