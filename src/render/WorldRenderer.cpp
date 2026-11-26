@@ -136,7 +136,7 @@ void WorldRenderer::SyncWithWorld(const nfs::World& world) {
         }
 
         auto gpu = std::make_unique<GpuSection>();
-        if (gpu->Upload(context_->Device(), *loaded[i])) {
+        if (gpu->Upload(context_->Device(), *loaded[i], world.IsWorld())) {
             target.libraryBounds = gpu->Bounds();
             target.gpu = std::move(gpu);
         }
@@ -405,7 +405,7 @@ void WorldRenderer::ApplyRenderStates() {
     // wound so that D3DCULL_CW discards their back faces; D3DCULL_CCW discards
     // the front ones instead, which leaves every surface in the city inside out.
     device->SetRenderState(D3DRS_CULLMODE,
-                           backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+                           BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE);
 
     device->SetRenderState(D3DRS_FILLMODE,
                            mode_ == RenderMode::Wireframe ? D3DFILL_WIREFRAME : D3DFILL_SOLID);
@@ -578,7 +578,7 @@ void WorldRenderer::DrawTranslucent(IDirect3DDevice9* device, RenderStats& stats
         const GpuSection& gpu = *itemGpu;
         device->SetStreamSource(0, gpu.VertexBuffer(), 0, sizeof(nfs::SolidVertex));
         device->SetIndices(gpu.IndexBuffer());
-        if (backfaceCulling_)
+        if (BackfaceCullingEnabled())
             device->SetRenderState(D3DRS_CULLMODE,
                                    item.mirrored ? OppositeCull(cullMode_) : cullMode_);
         const D3DMATRIX world = ToD3D(item.transform);
@@ -586,7 +586,7 @@ void WorldRenderer::DrawTranslucent(IDirect3DDevice9* device, RenderStats& stats
         DrawObject(device, *item.object, stats, DrawPass::Translucent);
     }
     EndTranslucentStates(device);
-    device->SetRenderState(D3DRS_CULLMODE, backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+    device->SetRenderState(D3DRS_CULLMODE, BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE);
     translucent_.clear();
 }
 
@@ -908,7 +908,7 @@ void WorldRenderer::Render(const Camera& camera) {
             const Mat4 placed = previewed ? posed * preview->delta : posed;
             const bool mirrored = animation ? Determinant3x3(placed) < 0.0f : instance.mirrored;
 
-            if (backfaceCulling_)
+            if (BackfaceCullingEnabled())
                 device->SetRenderState(D3DRS_CULLMODE,
                                        mirrored ? OppositeCull(cullMode_) : cullMode_);
 
@@ -922,7 +922,7 @@ void WorldRenderer::Render(const Camera& camera) {
 
     // MINIMAP PREVIEW (temporary)
     if (showMinimap_) {
-        minimapPreview_.Draw(device, backfaceCulling_ ? cullMode_ : D3DCULL_NONE,
+        minimapPreview_.Draw(device, BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE,
                              mode_ == RenderMode::Wireframe);
         device->SetFVF(kWorldVertexFvf);
     }
@@ -1340,7 +1340,7 @@ void WorldRenderer::DrawSelection(IDirect3DDevice9* device) {
     device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESS);
     device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
     device->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
-    device->SetRenderState(D3DRS_CULLMODE, backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+    device->SetRenderState(D3DRS_CULLMODE, BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE);
 }
 
 void WorldRenderer::DrawCollision(IDirect3DDevice9* device, const std::vector<size_t>& visible) {
@@ -1381,7 +1381,7 @@ void WorldRenderer::DrawCollision(IDirect3DDevice9* device, const std::vector<si
     device->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
     device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESS);
     device->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
-    device->SetRenderState(D3DRS_CULLMODE, backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+    device->SetRenderState(D3DRS_CULLMODE, BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE);
     device->SetRenderState(D3DRS_FILLMODE,
                            mode_ == RenderMode::Wireframe ? D3DFILL_WIREFRAME : D3DFILL_SOLID);
     device->SetFVF(kWorldVertexFvf);
@@ -1483,7 +1483,7 @@ void WorldRenderer::DrawSky(IDirect3DDevice9* device, const Camera& camera, Rend
             glDrawingSky_ = false;
             device->SetRenderState(D3DRS_ZENABLE, TRUE);
             device->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
-            device->SetRenderState(D3DRS_CULLMODE, backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+            device->SetRenderState(D3DRS_CULLMODE, BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE);
             return;   // one dome
         }
     }
@@ -1646,7 +1646,7 @@ void WorldRenderer::DrawWorldSky(IDirect3DDevice9* device, const Camera& camera,
     device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
     device->SetRenderState(D3DRS_ZENABLE, TRUE);
     device->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
-    device->SetRenderState(D3DRS_CULLMODE, backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+    device->SetRenderState(D3DRS_CULLMODE, BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE);
 }
 
 void WorldRenderer::SetRaceGroupsVisible(bool visible) {
@@ -1973,7 +1973,7 @@ void WorldRenderer::BeginModels(IDirect3DDevice9* device, const GpuSection& gpu)
     device->SetFVF(kWorldVertexFvf);
     device->SetStreamSource(0, gpu.VertexBuffer(), 0, sizeof(nfs::SolidVertex));
     device->SetIndices(gpu.IndexBuffer());
-    device->SetRenderState(D3DRS_CULLMODE, backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+    device->SetRenderState(D3DRS_CULLMODE, BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE);
     if (mode_ != RenderMode::Textured && mode_ != RenderMode::Unlit) BindTextureStage(device, CachedTexture{});
 }
 
@@ -2018,7 +2018,7 @@ void WorldRenderer::DrawObjectAnimations(IDirect3DDevice9* device, bool usingVis
                 bound = s;
             }
             const bool mirrored = Determinant3x3(pose[i]) < 0.0f;
-            if (backfaceCulling_)
+            if (BackfaceCullingEnabled())
                 device->SetRenderState(D3DRS_CULLMODE, mirrored ? OppositeCull(cullMode_) : cullMode_);
             const D3DMATRIX world = ToD3D(pose[i]);
             device->SetTransform(D3DTS_WORLD, &world);
@@ -2028,7 +2028,7 @@ void WorldRenderer::DrawObjectAnimations(IDirect3DDevice9* device, bool usingVis
                                  object.source ? Transform(object.source->bounds, pose[i]) : Aabb{}, eye);
         }
     }
-    if (backfaceCulling_) device->SetRenderState(D3DRS_CULLMODE, cullMode_);
+    if (BackfaceCullingEnabled()) device->SetRenderState(D3DRS_CULLMODE, cullMode_);
     static bool told = false;
     if (!told) {
         told = true;
@@ -2067,7 +2067,7 @@ void WorldRenderer::BeginUserMesh(IDirect3DDevice9* device) {
     const D3DMATRIX identity = ToD3D(Mat4::Identity());
     device->SetTransform(D3DTS_WORLD, &identity);
     device->SetFVF(kWorldVertexFvf);
-    device->SetRenderState(D3DRS_CULLMODE, backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+    device->SetRenderState(D3DRS_CULLMODE, BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE);
     device->SetRenderState(D3DRS_FILLMODE, mode_ == RenderMode::Wireframe ? D3DFILL_WIREFRAME : D3DFILL_SOLID);
 }
 
@@ -2097,7 +2097,7 @@ void WorldRenderer::EndOverlay(IDirect3DDevice9* device) {
     device->SetRenderState(D3DRS_SRCBLEND,  D3DBLEND_SRCALPHA);
     device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
     device->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
-    device->SetRenderState(D3DRS_CULLMODE, backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+    device->SetRenderState(D3DRS_CULLMODE, BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE);
     device->SetRenderState(D3DRS_FILLMODE,
                            mode_ == RenderMode::Wireframe ? D3DFILL_WIREFRAME : D3DFILL_SOLID);
     device->SetFVF(kWorldVertexFvf);
@@ -2349,7 +2349,7 @@ void WorldRenderer::DrawGizmo(IDirect3DDevice9* device, const Camera& camera) {
     device->SetRenderState(D3DRS_ZENABLE, TRUE);
     device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
     device->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
-    device->SetRenderState(D3DRS_CULLMODE, backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+    device->SetRenderState(D3DRS_CULLMODE, BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE);
 }
 
 // ---------------------------------------------------------------------------
@@ -2428,7 +2428,7 @@ bool WorldRenderer::BackdropOutOfZone(const GpuObject& object, u32 sectionNumber
 
 void WorldRenderer::ApplyBaseVisibility() {
     culling_ = true;
-    backfaceCulling_ = true;
+    SetBackfaceCullingEnabled(true);
     showScenery_ = true;
     showProxies_ = false;
     showLibrary_ = false;
@@ -2443,9 +2443,7 @@ void WorldRenderer::ApplyBaseVisibility() {
     showSky_ = true;
     showMinimap_ = false;
     showOriginalBuildings_ = true;
-    hiddenModels_ = nullptr;
-    gameSection_ = nullptr;
-    gameModel_ = nullptr;
+    // Road hiding and the drive preview's filters stay installed by their owners.
     // Presets are a reset: show the user-hidden items again.
     hiddenKeys_.clear();
     ++hiddenVersion_;
@@ -2641,7 +2639,7 @@ void WorldRenderer::EndGameLook(IDirect3DDevice9* device) {
     device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
     device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
     device->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
-    device->SetRenderState(D3DRS_CULLMODE, backfaceCulling_ ? cullMode_ : D3DCULL_NONE);
+    device->SetRenderState(D3DRS_CULLMODE, BackfaceCullingEnabled() ? cullMode_ : D3DCULL_NONE);
     device->SetFVF(kWorldVertexFvf);
     BindTextureStage(device, CachedTexture{});
 }

@@ -391,7 +391,7 @@ void CollisionTools::BuildMenu() {
         const int count = ::GetMenuItemCount(host_.menu);
         for (int i = 0; i < count; ++i)
             if (::GetSubMenu(host_.menu, i) == popup_) {
-                ::DeleteMenu(host_.menu, i, MF_BYPOSITION);
+                ::RemoveMenu(host_.menu, i, MF_BYPOSITION);
                 break;
             }
         ::DestroyMenu(popup_);
@@ -507,6 +507,9 @@ void CollisionTools::OnRegionLoaded() {
         RefreshWorldSurfaces();
         worldWallSurface_ = nfs::kSolidSurface;
         worldGroundSurface_ = nfs::kRoadSurface;
+        BuildMenu();
+    } else if (!worldSurfaces_.empty()) {
+        worldSurfaces_.clear();
         BuildMenu();
     }
     // Every collision change kept so far, one by one (models\collision-<REGION>.txt).

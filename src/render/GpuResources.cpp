@@ -90,7 +90,7 @@ void GpuSection::Release() {
     vertexCount_ = triangleCount_ = 0;
 }
 
-bool GpuSection::Upload(IDirect3DDevice9* device, const nfs::LoadedSection& section) {
+bool GpuSection::Upload(IDirect3DDevice9* device, const nfs::LoadedSection& section, bool nfsw) {
     Release();
     if (!device) return false;
 
@@ -165,11 +165,11 @@ bool GpuSection::Upload(IDirect3DDevice9* device, const nfs::LoadedSection& sect
             gpuObject.isBackdrop  = object.IsBackdrop();
             std::string upper = object.name;
             for (char& c : upper) c = (char)std::toupper((unsigned char)c);
-            // World's names are mixed case (XO_TrackBarrierPlayer), so match the
-            // race families after upper-casing; UG2's uppercase names still work.
-            gpuObject.raceProp    = upper.rfind("ZPM_", 0) == 0 ||
-                                    upper.find("TRACKBARRIER") != std::string::npos ||
-                                    upper.find("CRASHBARRIER") != std::string::npos;
+            // World adds mixed-case track barriers and the crash barrier family.
+            const std::string& raceName = nfsw ? upper : object.name;
+            gpuObject.raceProp    = raceName.rfind("ZPM_", 0) == 0 ||
+                                    raceName.find("TRACKBARRIER") != std::string::npos ||
+                                    (nfsw && raceName.find("CRASHBARRIER") != std::string::npos);
             gpuObject.baseVertex  = vertexCursor;
             {
                 const bool pan = upper.rfind("PAN_", 0) == 0;

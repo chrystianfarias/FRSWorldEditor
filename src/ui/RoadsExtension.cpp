@@ -760,7 +760,13 @@ public:
     }
 
     bool ToolShortcut(WPARAM key, bool repeat) override {
-        if (!drawTool_) return false;
+        if (!drawTool_ || !IsWorldRegion() || CurrentDrawMode() != kDrawPen) return false;
+        // The pen owns the next viewport click while it is drawing.
+        if (key == VK_TAB || key == 'G' || key == 'R') return true;
+        return HandleDrawKey(key, repeat);
+    }
+
+    bool HandleDrawKey(WPARAM key, bool repeat) {
         switch (key) {
             case VK_ESCAPE:
                 if (!repeat) {
@@ -772,11 +778,6 @@ public:
                 return true;
             case VK_RETURN:
                 if (!repeat) EndDrawChain();
-                return true;
-            case VK_TAB:
-            case 'G':
-            case 'R':
-                // Mesh editing or a grab here would steal the next road click.
                 return true;
             default:
                 return DrawToolKey(key);
@@ -954,7 +955,6 @@ public:
             CityDemo(*world);
         }
         if (world->Region() != historyRegion_) {
-            drawMode_ = world->IsWorld() ? kDrawPen : kDrawStraight;
             if (world->IsWorld() || roads::IsWorldLaneTexture(lastProfile_.laneCentre) ||
                 !lastProfile_.surfaceBands.empty()) {
                 lastProfile_ = roads::RoadProfile{};
@@ -1281,8 +1281,12 @@ public:
             if (key == VK_OEM_4) { treeRadius_ = std::max(1.0f, treeRadius_ / 1.2f); return true; }   // [
             if (key == VK_OEM_6) { treeRadius_ = std::min(200.0f, treeRadius_ * 1.2f); return true; } // ]
         }
-        if (::GetKeyState(VK_CONTROL) >= 0 && ::GetKeyState(VK_MENU) >= 0 &&
-            ToolShortcut(key, repeat)) return true;
+        if (drawTool_) {
+            if (IsWorldRegion() && CurrentDrawMode() == kDrawPen) {
+                if (::GetKeyState(VK_CONTROL) >= 0 && ::GetKeyState(VK_MENU) >= 0 &&
+                    ToolShortcut(key, repeat)) return true;
+            } else if (HandleDrawKey(key, false)) return true;
+        }
         if (drawing_) {
             if (key == VK_ESCAPE) {
                 drawing_ = false;
@@ -3467,7 +3471,7 @@ private:
         SetBrush(terrain::Brush::None);
         drawing_ = false;
         const bool wasOpen = drawTool_;
-        if (!wasOpen) {
+        if (!wasOpen && IsWorldRegion()) {
             if (!from) app_.Renderer().ClearSelection();
             app_.Renderer().SetCollisionSelectionList({});
         }
@@ -3492,7 +3496,7 @@ private:
         }
         ::SetFocus(app_.View().Handle());
         app_.UpdateMenuChecks();
-        app_.Status(drawMode_ == kDrawPen ? L"Road pen: click to add a node, drag to set its curve handle. Enter finishes."
+        app_.Status(CurrentDrawMode() == kDrawPen ? L"Road pen: click to add a node, drag to set its curve handle. Enter finishes."
             : L"Drawing roads: click open ground for nodes, a node to join it, a road to put a node in it. "
               L"Enter ends the road, Esc closes the tool.");
     }
@@ -3594,7 +3598,7 @@ private:
         }
         Vec3 ground;
         Vec3 start;
-        const std::optional<float> fallback = drawMode_ == kDrawPen && DrawStart(start)
+        const std::optional<float> fallback = CurrentDrawMode() == kDrawPen && DrawStart(start)
             ? std::optional<float>(start.z - drawElevation_) : std::nullopt;
         if (AnythingUnder(x, y, ground, fallback)) {
             hit.kind = DrawHit::Ground;
@@ -3616,12 +3620,15 @@ private:
 
     enum DrawMode { kDrawStraight = 0, kDrawCurved, kDrawFreeform, kDrawUpgrade, kDrawBulldoze, kDrawPen, kDrawModes };
 
-    int DrawModeCount() const { return app_.World() && app_.World()->IsWorld() ? kDrawModes : kDrawPen; }
-    bool DrawChangesExistingRoad() const { return drawMode_ == kDrawUpgrade || drawMode_ == kDrawBulldoze; }
+    bool IsWorldRegion() const { return app_.World() && app_.World()->IsWorld(); }
+    int DrawModeCount() const { return IsWorldRegion() ? kDrawModes : kDrawPen; }
+    int CurrentDrawMode() const { return IsWorldRegion() ? worldDrawMode_ : legacyDrawMode_; }
+    bool DrawChangesExistingRoad() const { return CurrentDrawMode() == kDrawUpgrade || CurrentDrawMode() == kDrawBulldoze; }
     void SetDrawMode(int mode) {
-        if (drawMode_ == mode) return;
+        int& current = IsWorldRegion() ? worldDrawMode_ : legacyDrawMode_;
+        if (current == mode) return;
         CancelPen();
-        drawMode_ = mode;
+        current = mode;
         drawHasControl_ = false;
         penFromHandle_ = {};
     }
@@ -3746,13 +3753,13 @@ private:
         DrawHit hit = DrawHitAt(x, y);
         if (DrawChangesExistingRoad()) return hit;
         if (hit.kind == DrawHit::Ground) {
-            if (drawMode_ == kDrawPen) {
+            if (CurrentDrawMode() == kDrawPen) {
                 hit.point.z += drawElevation_;
                 return hit;
             }
             Vec3 start;
             const bool started = DrawStart(start);
-            if (drawMode_ == kDrawCurved && started && drawHasControl_) hit.point = TakeGround(hit.point, &drawControl_);
+            if (CurrentDrawMode() == kDrawCurved && started && drawHasControl_) hit.point = TakeGround(hit.point, &drawControl_);
             else hit.point = TakeGround(hit.point, started ? &start : nullptr);
         }
         return hit;
@@ -3774,7 +3781,7 @@ private:
         Vec3 leaveA = c, leaveB = c * -1.0f;
         float hA = length / 3.0f, hB = length / 3.0f;
         plan.shape = 1;
-        if (drawMode_ == kDrawPen) {
+        if (CurrentDrawMode() == kDrawPen) {
             const auto curve = roads::PenCurve(start, end, penFromHandle_, penEndHandle);
             const Vec3 a{ curve.p1.x - start.x, curve.p1.y - start.y, 0 };
             const Vec3 b{ curve.p2.x - end.x, curve.p2.y - end.y, 0 };
@@ -3785,7 +3792,7 @@ private:
                 leaveA = hA > 1e-5f ? a * (1.0f / hA) : c;
                 leaveB = hB > 1e-5f ? b * (1.0f / hB) : c * -1.0f;
             }
-        } else if (drawMode_ == kDrawCurved && drawHasControl_) {
+        } else if (CurrentDrawMode() == kDrawCurved && drawHasControl_) {
             // A quadratic curve through the control point, as a cubic.
             const Vec3 toA{ drawControl_.x - start.x, drawControl_.y - start.y, 0.0f };
             const Vec3 toB{ drawControl_.x - end.x, drawControl_.y - end.y, 0.0f };
@@ -3797,7 +3804,7 @@ private:
                 hA = la * 2.0f / 3.0f;
                 hB = lb * 2.0f / 3.0f;
             }
-        } else if (drawMode_ == kDrawFreeform && drawLastValid_ && length > 1.0f) {
+        } else if (CurrentDrawMode() == kDrawFreeform && drawLastValid_ && length > 1.0f) {
             // A circular arc leaving in the direction the last road arrived.
             const Vec3 t0 = drawLast_;
             const float cosHalf = std::clamp(Dot(t0, c), -1.0f, 1.0f);
@@ -3883,9 +3890,9 @@ private:
     }
 
     bool DrawToolMouseDown(int x, int y) {
-        if (drawMode_ == kDrawUpgrade || drawMode_ == kDrawBulldoze) {
+        if (CurrentDrawMode() == kDrawUpgrade || CurrentDrawMode() == kDrawBulldoze) {
             const DrawHit hit = DrawHitAt(x, y);
-            if (drawMode_ == kDrawBulldoze && hit.kind == DrawHit::Node) {
+            if (CurrentDrawMode() == kDrawBulldoze && hit.kind == DrawHit::Node) {
                 network_.RemoveNode(hit.node);
                 Changed(true);
                 app_.Status(Fmt(L"Node %u and its roads bulldozed", hit.node));
@@ -3894,7 +3901,7 @@ private:
             const u32 road = RoadUnder(x, y);
             roads::Segment* s = network_.FindSegment(road);
             if (!s) return true;
-            if (drawMode_ == kDrawBulldoze) {
+            if (CurrentDrawMode() == kDrawBulldoze) {
                 network_.RemoveSegment(road);
                 Changed(true);
                 app_.Status(Fmt(L"Road %u bulldozed", road));
@@ -3919,7 +3926,7 @@ private:
         }
 
         const DrawHit hit = DrawToolHit(x, y);
-        if (drawMode_ == kDrawPen) {
+        if (CurrentDrawMode() == kDrawPen) {
             CancelPen();
             if (hit.kind != DrawHit::None) {
                 pen_ = PenGesture{ hit, { (float)x, (float)y }, {} };
@@ -3934,7 +3941,7 @@ private:
     bool CommitDrawHit(const DrawHit& hit, const Vec3& penEndHandle = {}) {
         const bool drawingRoad = drawFrom_ || drawPending_;
         // Curved: the second click is where the curve bends towards.
-        if (drawMode_ == kDrawCurved && drawingRoad && !drawHasControl_ && hit.kind != DrawHit::None) {
+        if (CurrentDrawMode() == kDrawCurved && drawingRoad && !drawHasControl_ && hit.kind != DrawHit::None) {
             drawControl_ = hit.point;
             drawHasControl_ = true;
             app_.Status(L"Curve: now click where the road ends");
@@ -3981,7 +3988,7 @@ private:
                     drawStart_ = hit.point;
                     drawLastValid_ = false;
                     penFromHandle_ = penEndHandle;
-                    app_.Status(drawMode_ == kDrawCurved ? L"Road started: click where its curve bends towards"
+                    app_.Status(CurrentDrawMode() == kDrawCurved ? L"Road started: click where its curve bends towards"
                                                          : L"Road started: click where it goes next");
                     return true;
                 }
@@ -4017,7 +4024,7 @@ private:
         Vec3 start;
         if (DrawChangesExistingRoad() || !DrawStart(start) || drawHover_.kind == DrawHit::None ||
             FlatDistance(start, drawHover_.point) < 0.1f) return false;
-        if (drawMode_ == kDrawCurved && !drawHasControl_) return false;
+        if (CurrentDrawMode() == kDrawCurved && !drawHasControl_) return false;
         plan = PlanRoad(start, drawHover_.point, pen_ ? pen_->handle : Vec3{});
         return true;
     }
@@ -4043,7 +4050,7 @@ private:
                 if (m) ImGui::SameLine();
                 char label[48];
                 std::snprintf(label, sizeof(label), "%s (%d)", DrawModeName(m), m + 1);
-                const bool on = drawMode_ == m;
+                const bool on = CurrentDrawMode() == m;
                 if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
                 if (ImGui::Button(label)) SetDrawMode(m);
                 if (on) ImGui::PopStyleColor();
@@ -4053,7 +4060,7 @@ private:
                 ImGui::SameLine();
                 if (ImGui::SmallButton(PresetName(k))) drawProfile_ = PresetProfile(k);
             }
-            if (drawMode_ != kDrawPen) {
+            if (CurrentDrawMode() != kDrawPen) {
                 ImGui::Checkbox("Snap angle (15\xC2\xB0)", &drawSnapAngle_);
                 ImGui::SameLine();
                 ImGui::Checkbox("Snap length (8 m)", &drawSnapLength_);
@@ -4128,7 +4135,7 @@ private:
             ImGui::Separator();
             PlannedRoad plan;
             const bool drawingRoad = drawFrom_ || drawPending_;
-            switch (drawMode_) {
+            switch (CurrentDrawMode()) {
                 case kDrawPen:
                     ImGui::TextUnformatted("Click for a corner. Drag from a node to set its curve handle.");
                     break;
@@ -4145,7 +4152,7 @@ private:
                     break;
                 default:
                     if (drawingRoad)
-                        ImGui::TextUnformatted(drawMode_ == kDrawFreeform
+                        ImGui::TextUnformatted(CurrentDrawMode() == kDrawFreeform
                                                    ? "Click on: each road curves on from the last one's direction."
                                                    : "Click where the road goes next. On a node it joins it; on a road it makes a node there.");
                     else
@@ -4670,7 +4677,7 @@ private:
             if (std::getenv("FRS_CITY_DEMO_HUD")) {
                 StartDrawTool(0);
                 drawProfile_ = p;
-                drawMode_ = kDrawCurved;
+                SetDrawMode(kDrawCurved);
             }
             centre = a + Vec3{ 60.0f, 55.0f, 4.0f };
             eye = a + Vec3{ 175.0f, -75.0f, 60.0f };
@@ -7742,7 +7749,8 @@ private:
     Vec3  drawStart_;
     roads::RoadProfile drawProfile_;
     DrawHit drawHover_;
-    int   drawMode_ = 0;                 // a DrawMode
+    int   legacyDrawMode_ = kDrawStraight;
+    int   worldDrawMode_ = kDrawPen;
     bool  drawSnapAngle_ = true, drawSnapLength_ = false;
     float drawElevation_ = 0.0f;         // above the ground, for what is drawn next
     int   drawZone_ = 0;
@@ -8939,10 +8947,10 @@ void RoadsExtension::DrawOverlay(IDirect3DDevice9* device, const Camera& camera,
                 line(previous - s0 * half + lift, p - s1 * half + lift, 0xA0FFD040);
                 previous = p;
             }
-        } else if (started && drawMode_ == kDrawCurved && !drawHasControl_) {
+        } else if (started && CurrentDrawMode() == kDrawCurved && !drawHasControl_) {
             line(from + Vec3{ 0, 0, 0.4f }, at, 0x80FFD040);      // towards the bend point
         }
-        if (started && drawMode_ == kDrawCurved && drawHasControl_) {
+        if (started && CurrentDrawMode() == kDrawCurved && drawHasControl_) {
             const Vec3 c = drawControl_ + Vec3{ 0, 0, 0.4f };
             line(from + Vec3{ 0, 0, 0.4f }, c, 0x80FFFFFF);
             line(c, at, 0x80FFFFFF);
@@ -8960,7 +8968,7 @@ void RoadsExtension::DrawOverlay(IDirect3DDevice9* device, const Camera& camera,
     if (drawTool_ && DrawChangesExistingRoad())
         if (const roads::Segment* s = network_.FindSegment(drawHoverRoad_)) {
             const roads::Curve curve = network_.CurveOf(*s);
-            const D3DCOLOR c = drawMode_ == kDrawBulldoze ? 0xFFFF4040 : 0xFF40E0FF;
+            const D3DCOLOR c = CurrentDrawMode() == kDrawBulldoze ? 0xFFFF4040 : 0xFF40E0FF;
             const float half = s->profile.HalfWidth();
             for (int i = 0; i < 40; ++i) {
                 const Vec3 p0 = curve.At(i / 40.0f), p1 = curve.At((i + 1) / 40.0f);

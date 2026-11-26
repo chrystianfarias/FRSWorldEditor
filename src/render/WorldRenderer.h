@@ -181,8 +181,12 @@ public:
     bool CullingEnabled() const { return culling_; }
     void SetCullingEnabled(bool enabled) { culling_ = enabled; }
 
-    bool BackfaceCullingEnabled() const { return backfaceCulling_; }
-    void SetBackfaceCullingEnabled(bool enabled) { backfaceCulling_ = enabled; }
+    bool BackfaceCullingEnabled() const {
+        return world_ && world_->IsWorld() ? worldBackfaceCulling_ : backfaceCulling_;
+    }
+    void SetBackfaceCullingEnabled(bool enabled) {
+        (world_ && world_->IsWorld() ? worldBackfaceCulling_ : backfaceCulling_) = enabled;
+    }
 
     // The painted backdrop encloses the city, so it is hidden by default.
     bool BackdropVisible() const { return showBackdrop_; }
@@ -626,9 +630,8 @@ private:
 
     RenderMode mode_ = RenderMode::Textured;
     bool       culling_ = true;
-    // Editing wants the whole world visible and both sides drawn; the game
-    // look/settings can turn culling back on.
-    bool       backfaceCulling_ = false;
+    bool       backfaceCulling_ = true;
+    bool       worldBackfaceCulling_ = false;
     bool       showBackdrop_ = false;
     bool       showScenery_ = true;
     bool       showProxies_ = false;

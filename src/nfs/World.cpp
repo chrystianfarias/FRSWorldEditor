@@ -752,7 +752,7 @@ const LoadedSection* World::LoadSection(const Section& section) {
     }
 
     const ByteSpan buffer = SectionBytes(section);
-    if (buffer.empty()) {
+    if (nfsw && buffer.empty()) {
         LOG_WARN("section %s has no readable bytes", section.name.c_str());
         return nullptr;
     }
@@ -763,7 +763,7 @@ const LoadedSection* World::LoadSection(const Section& section) {
     // When the section comes from an earlier save, the shipped scenery counts
     // say which records are the editor's own.
     std::vector<size_t> shippedInstances;
-    const bool fromSpan = !nfsw && (buffer.data < stream_.Span().data ||
+    const bool fromSpan = !nfsw && !buffer.empty() && (buffer.data < stream_.Span().data ||
                                     buffer.data >= stream_.Span().data + stream_.Size());
     if (fromSpan &&
         section.originalStreamOffset + (u64)section.originalStreamSize <= stream_.Size()) {
