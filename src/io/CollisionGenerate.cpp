@@ -2,6 +2,7 @@
 
 #include "io/CollisionEdit.h"
 #include "nfs/FreeRoam.h"
+#include "nfs/NfswCollision.h"
 #include "nfs/SolidList.h"
 #include "nfs/World.h"
 
@@ -43,12 +44,12 @@ double Cross2(const Vec2& o, const Vec2& a, const Vec2& b) {
 }
 
 // Andrew's monotone chain; counter-clockwise, no repeat of the first point.
-std::vector<Vec2> ConvexHull(std::vector<Vec2> points) {
+std::vector<Vec2> ConvexHull(std::vector<Vec2> points, float spacing) {
     std::sort(points.begin(), points.end(), [](const Vec2& a, const Vec2& b) {
         return a.x != b.x ? a.x < b.x : a.y < b.y;
     });
-    points.erase(std::unique(points.begin(), points.end(), [](const Vec2& a, const Vec2& b) {
-                     return std::fabs(a.x - b.x) < 0.05f && std::fabs(a.y - b.y) < 0.05f;
+    points.erase(std::unique(points.begin(), points.end(), [spacing](const Vec2& a, const Vec2& b) {
+                     return std::fabs(a.x - b.x) < spacing && std::fabs(a.y - b.y) < spacing;
                  }), points.end());
     if (points.size() < 3) return points;
     std::vector<Vec2> hull(points.size() * 2);
@@ -69,7 +70,7 @@ std::vector<Vec2> ConvexHull(std::vector<Vec2> points) {
 
 GenerateResult GenerateObjectCollision(const nfs::SolidObject& model, const Mat4& transform,
                                        const nfs::World* world,
-                                       std::vector<nfs::CollisionPolygon>& out) {
+                                       std::vector<nfs::CollisionPolygon>& out, GenerateMode mode) {
     GenerateResult result;
     const auto& vertices = model.vertices;
     const auto& indices = model.indices;
@@ -105,7 +106,15 @@ GenerateResult GenerateObjectCollision(const nfs::SolidObject& model, const Mat4
     std::vector<Face> faces;
     faces.reserve(indices.size() / 3);
     double vote = 0.0;
+    const bool roadMaterialOnly = mode == GenerateMode::GroundOnly && model.HasNfswRoadSurface();
+    auto material = model.materials.begin();
     for (size_t t = 0; t + 2 < indices.size(); t += 3) {
+        if (roadMaterialOnly) {
+            while (material != model.materials.end() &&
+                   t >= (size_t)material->firstIndex + material->indexCount) ++material;
+            if (material == model.materials.end() || t < material->firstIndex ||
+                !material->nfswRoadSurface) continue;
+        }
         const u16 i0 = indices[t], i1 = indices[t + 1], i2 = indices[t + 2];
         if (i0 >= points.size() || i1 >= points.size() || i2 >= points.size()) continue;
         const Vec3 &a = points[i0], &b = points[i1], &c = points[i2];
@@ -135,6 +144,8 @@ GenerateResult GenerateObjectCollision(const nfs::SolidObject& model, const Mat4
         const float low = std::min({ f.a.z, f.b.z, f.c.z }), high = std::max({ f.a.z, f.b.z, f.c.z });
         if (low <= foot + 0.6f && high >= foot + 0.3f) { drivable = true; break; }
     }
+    if (mode == GenerateMode::SolidWalls) drivable = false;
+    if (mode == GenerateMode::GroundOnly) drivable = true;
     result.shape = drivable ? GeneratedShape::Drivable : GeneratedShape::Solid;
 
     // --- ground on the upward faces ---------------------------------------------
@@ -142,7 +153,10 @@ GenerateResult GenerateObjectCollision(const nfs::SolidObject& model, const Mat4
         for (const Face& f : faces) {
             if (f.nz * up <= 0.6f) continue;
             if ((f.a.z + f.b.z + f.c.z) / 3.0f < foot + above) continue;
-            if (result.ground >= kMaxGround) { result.groundCapped = true; break; }
+            if (mode != GenerateMode::GroundOnly && result.ground >= kMaxGround) {
+                result.groundCapped = true;
+                break;
+            }
             const Vec3 corners[3] = { f.a, f.b, f.c };
             out.push_back(MakeGround(corners, 3, nfs::kSurfaceRoad));
             ++result.ground;
@@ -163,7 +177,9 @@ GenerateResult GenerateObjectCollision(const nfs::SolidObject& model, const Mat4
     if (plan.size() < 2)
         for (const Vec3& p : points) plan.push_back({ p.x, p.y });
 
-    std::vector<Vec2> hull = ConvexHull(plan);
+    const bool worldBoundary = mode == GenerateMode::SolidWalls;
+    constexpr float kWorldSpacing = 1.0f / 64.0f;  // two World quantization steps
+    std::vector<Vec2> hull = ConvexHull(plan, worldBoundary ? kWorldSpacing : 0.05f);
     double area = 0.0;
     for (size_t i = 0; i < hull.size(); ++i) {
         const Vec2& a = hull[i];
@@ -177,9 +193,15 @@ GenerateResult GenerateObjectCollision(const nfs::SolidObject& model, const Mat4
     options.surface = WallSurfaceFor(model.name);
     options.height = std::clamp(maxZ - foot, 0.5f, 100.0f);
     options.sink = 0.5f;
+    if (worldBoundary) {
+        // World boundaries respond on either side of one segment. The UG2
+        // thickness would create a second, opposing contact inside the prop.
+        options.bothSides = false;
+        options.minSpacing = kWorldSpacing;
+    }
 
     std::vector<Vec3> outline;
-    if (hull.size() >= 3 && area > 0.02) {
+    if (hull.size() >= 3 && area > (worldBoundary ? kWorldSpacing * kWorldSpacing : 0.02f)) {
         for (const Vec2& p : hull) outline.push_back({ p.x, p.y, foot });
         outline.push_back(outline.front());
     } else {
@@ -191,7 +213,7 @@ GenerateResult GenerateObjectCollision(const nfs::SolidObject& model, const Mat4
                 const float d = (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y);
                 if (d > best) { best = d; lo = a; hi = b; }
             }
-        if (best < 0.04f) {
+        if (best < (worldBoundary ? kWorldSpacing * kWorldSpacing : 0.04f)) {
             result.note = L"it is too small to stop a car";
             return result;
         }
@@ -202,8 +224,80 @@ GenerateResult GenerateObjectCollision(const nfs::SolidObject& model, const Mat4
     result.walls = out.size() - before;
 
     // Roofs and tops a car may land on.
-    addGround(0.75f);
+    if (mode == GenerateMode::Automatic) addGround(0.75f);
     return result;
+}
+
+size_t RemoveCoveredRoadGround(const nfs::World& world, std::vector<nfs::CollisionPolygon>& ground) {
+    if (ground.empty()) return 0;
+    constexpr float heightTolerance = 0.12f;
+    const auto overlaps = [](const Aabb& a, const Aabb& b) {
+        return a.min.x <= b.max.x && b.min.x <= a.max.x &&
+               a.min.y <= b.max.y && b.min.y <= a.max.y &&
+               a.min.z <= b.max.z && b.min.z <= a.max.z;
+    };
+    Aabb area;
+    for (const auto& face : ground)
+        for (const auto& corner : face.corners) area.Add(corner);
+    area.min.z -= heightTolerance;
+    area.max.z += heightTolerance;
+    struct Face { const nfs::CollisionPolygon* polygon; Aabb box; };
+    std::vector<Face> nearby;
+    const auto scan = [&](const nfs::CollisionPack& pack) {
+        if (pack.bounds.Valid() && !overlaps(area, pack.bounds)) return;
+        for (const auto& polygon : pack.polygons) {
+            if (polygon.Vertical() || polygon.barrier) continue;
+            Aabb box;
+            for (const auto& corner : polygon.corners) box.Add(corner);
+            if (overlaps(area, box)) nearby.push_back({ &polygon, box });
+        }
+    };
+    for (const auto& section : world.Loaded())
+        for (const auto& pack : section->collision) scan(pack);
+
+    nfs::CollisionPack generated;
+    if (const auto* section = world.Table().FindByNumber(nfs::kNfswCollisionSection)) {
+        nfs::NfswReadGeneratedRoadGround(world.SectionBytes(*section), generated);
+        scan(generated);
+    }
+    const auto covered = [&](const Vec3& point) {
+        const Ray ray{ point + Vec3{ 0, 0, heightTolerance }, { 0, 0, -1 } };
+        const auto hits = [&](const Vec3& a, const Vec3& b, const Vec3& c) {
+            const float distance = IntersectRayTriangle(ray, a, b, c);
+            return distance >= 0.0f && distance <= heightTolerance * 2.0f;
+        };
+        for (const Face& face : nearby) {
+            const auto& box = face.box;
+            if (point.x < box.min.x || point.x > box.max.x ||
+                point.y < box.min.y || point.y > box.max.y ||
+                point.z + heightTolerance < box.min.z || point.z - heightTolerance > box.max.z) continue;
+            const Vec3* c = face.polygon->corners;
+            if (hits(c[0], c[1], c[2]) || (face.polygon->quad && hits(c[0], c[2], c[3]))) return true;
+        }
+        return false;
+    };
+    const size_t count = ground.size();
+    ground.erase(std::remove_if(ground.begin(), ground.end(), [&](const auto& face) {
+        // Interior points avoid dropping usable triangles because a probe
+        // lands exactly on the boundary between two native faces.
+        const Vec3* c = face.corners;
+        const Vec3 centre = (c[0] + c[1] + c[2]) * (1.0f / 3.0f);
+        if (!covered(centre)) return false;
+        for (size_t i = 0; i < 3; ++i)
+            if (!covered(centre * 0.15f + c[i] * 0.85f)) return false;
+        return true;
+    }), ground.end());
+    return count - ground.size();
+}
+
+void GenerateNfswPlacementCollision(const nfs::SolidObject& model, const Mat4& transform,
+                                    std::vector<nfs::CollisionPolygon>& out) {
+    if (model.IsTerrain() || model.HasNfswRoadSurface()) {
+        GenerateObjectCollision(model, transform, nullptr, out, GenerateMode::GroundOnly);
+        return;
+    }
+    if (model.kind != nfs::ObjectKind::Prop) return;
+    GenerateObjectCollision(model, transform, nullptr, out, GenerateMode::SolidWalls);
 }
 
 } // namespace collision

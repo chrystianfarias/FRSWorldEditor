@@ -22,6 +22,10 @@ enum class TextureFormat {
     Palettised8,
     // D3DFMT_A8R8G8B8, uncompressed: Underground 1's sky (TEX<n>TRACK.BIN).
     Argb8888,
+    // NFS World's ATI1/ATI2 (BC4/BC5). ATI1 is one channel, ATI2 two; both
+    // decode on the CPU into BGRA before upload.
+    Bc4,
+    Bc5,
 };
 
 const char* ToString(TextureFormat format);
@@ -56,10 +60,10 @@ struct Texture {
     AlphaUsage    alphaUsage = AlphaUsage::None;
     AlphaBlend    alphaBlend = AlphaBlend::SrcCopy;
 
-    // Scrolling, from +0x52 (type: 0 none, 1 smooth, 2 in steps) and the
-    // 8.8 fixed-point values at +0x58: seconds a step, texture lengths a
-    // second along S and T. The fountains' and waterfalls' water flows by
-    // it, rolling neon signs turn by it.
+    // Scrolling: type 0 none, 1 smooth, 2 in steps; step is seconds, S/T are
+    // texture lengths per second. UG2 reads type +0x52, step/S/T as 8.8 at
+    // +0x58; NFSW reads type +0x35, step 8.8 at +0x3C and S/T as 1/16384 at
+    // +0x3E/+0x40. The parsers normalise both into these floats.
     u8    scrollType = 0;
     float scrollStep = 1.0f;
     float scrollS = 0.0f, scrollT = 0.0f;
@@ -69,6 +73,16 @@ struct Texture {
     ByteSpan palette;        // 256 entries, empty unless the format is palettised
 };
 
+// One NFS World frame animation, chunk 0xB3312004 inside a pack's info block.
+// The animation is keyed by its first frame: materials name that texture, not
+// the animation name or its key hash.
+struct TextureFrameAnimation {
+    std::string      name;
+    u32              keyHash = 0;
+    float            fps = 0.0f;
+    std::vector<u32> frames;
+};
+
 // A 0xB3300000 texture pack.
 class TexturePack {
 public:
@@ -76,7 +90,13 @@ public:
     // came from, so keep the file mapped for as long as the pack is used.
     bool Parse(const Chunk& packChunk);
 
+    // NFS World: 144-byte headers, ATI1/ATI2/DXT formats, pixel data after a
+    // 0x78-byte preamble. Streaming 0xB3300011 packs duplicate textures that
+    // the normal packs already describe, so they are ignored here.
+    bool ParseNfsw(const Chunk& packChunk);
+
     const std::vector<Texture>& Textures() const { return textures_; }
+    const std::vector<TextureFrameAnimation>& Animations() const { return animations_; }
 
     const Texture* Find(u32 hash) const;
 
@@ -88,8 +108,13 @@ private:
     // block holding its pixels, then its 124-byte header and 32-byte format.
     bool ParseCompressed(const Chunk& packChunk, ByteSpan index);
 
-    std::string          name_;
-    std::vector<Texture> textures_;
+    // NFS World's variant: 36-byte index entries, each pointing at a run of
+    // 0x55441122 blocks that decompress to an ordinary TPK.
+    bool ParseNfswCompressed(const Chunk& packChunk, ByteSpan index);
+
+    std::string                       name_;
+    std::vector<Texture>              textures_;
+    std::vector<TextureFrameAnimation> animations_;
     std::vector<std::vector<u8>> owned_;   // decompressed blocks
     std::unordered_map<u32, size_t> byHash_;
 };

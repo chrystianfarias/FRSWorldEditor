@@ -5,6 +5,9 @@
 #include "io/MeshOverlay.h"
 #include "nfs/WorldAnimation.h"
 #include "nfs/Collision.h"
+#include "nfs/NfswCollision.h"
+#include "nfs/NfswFormats.h"
+#include "nfs/NfswSmackableAttributes.h"
 #include "nfs/Preculler.h"
 #include "nfs/SectionTable.h"
 #include "nfs/Scenery.h"
@@ -13,6 +16,7 @@
 #include "nfs/TexturePack.h"
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -32,6 +36,10 @@ struct LoadedSection {
     std::vector<std::unique_ptr<TexturePack>> texturePacks;
     Scenery                 scenery;
     std::vector<CollisionPack> collision;
+    std::vector<NfswSmackableBox> smackableBoxes;
+    std::vector<NfswSmackableLink> smackableLinks;
+    std::unordered_map<size_t, size_t> smackableScenery;  // scenery index -> spawn link index
+    std::vector<size_t> nfswEditedScenery;    // saved transforms/additions that need placement collision
 
     // Scenery the editor placed, kept apart from the shipped instances so
     // those stay exactly as they were and a save knows what to append. A
@@ -92,12 +100,19 @@ struct LoadedSection {
 // of the moment (chunk 0xB0300100, beside a section's texture pack).
 struct TextureAnimation {
     std::string      name;
-    std::vector<u32> frames;     // texture hashes, the first is the one materials use
+    std::vector<u32> frames;     // texture hashes, in cycle order
     float            fps = 0.0f;
+    u8               startFrame = 0;   // material names this frame; cycle from here
 };
 
 // The games whose worlds the editor reads.
-enum class Game { Underground2, Underground1 };
+enum class Game { Underground2, Underground1, World };
+
+// NFS World's server-driven scenery groups. Normal hides every holiday's own
+// props, the Top Gear event billboards and the track barrier groups; the
+// others show that group and hide its "disable" group. All shows everything.
+enum class Holiday { Normal, Halloween, Oktoberfest, Christmas, Valentines, NewYears,
+                     TopGear, All };
 
 // One track region: the L4Rx.BUN layout file plus its STREAML4Rx.BUN payload.
 //
@@ -106,6 +121,9 @@ enum class Game { Underground2, Underground1 };
 // zones and the whole track's collision, over a stream shared by every track
 // of the region. The region opens with one of those bundles in the layout's
 // place (see OpenUnderground1).
+//
+// NFS World has the layout file but no single stream: every section is its
+// own STREAM<region>_<number>.BUN, read whole on first use (see OpenNfsw).
 //
 // Sections are parsed on demand. Because the stream stays memory-mapped, a
 // section that is never visited costs nothing beyond its table entry.
@@ -126,10 +144,14 @@ public:
     bool Open(const std::wstring& tracksDirectory, const std::wstring& region);
     void Close();
 
-    bool IsOpen() const { return stream_.IsOpen(); }
+    bool IsOpen() const {
+        return IsWorld() ? (layout_.IsOpen() || !layoutUnpacked_.empty())
+                         : (stream_.IsOpen() || !layoutUnpacked_.empty());
+    }
 
     Game GameKind() const { return game_; }
     bool IsUnderground1() const { return game_ == Game::Underground1; }
+    bool IsWorld() const { return game_ == Game::World; }
     // An empty region the editor made (nfs/CustomRegions.h): its source's city
     // hidden, and taken out of every section it saves.
     bool EmptyCity() const { return emptyCity_; }
@@ -137,7 +159,11 @@ public:
     u32  TrackNumber() const { return trackNumber_; }
 
     const std::wstring& Region() const { return region_; }
+    const std::wstring& TracksDirectory() const { return tracksDirectory_; }
     const SectionTable& Table()  const { return table_; }
+
+    // NFS World's section BUN file name, e.g. STREAML5RA_436.BUN.
+    std::wstring NfswSectionFileName(const Section& section) const;
 
     // The mapped stream, for anything that has to work in file bytes rather
     // than in parsed geometry -- rebuilding a section, for one.
@@ -147,6 +173,8 @@ public:
     // earlier import replaced the section, the stream file otherwise. Building
     // a new edit on these keeps the edits already in force.
     ByteSpan SectionBytes(const Section& section) const;
+    // Drops the cached section files so the next read sees a fresh overlay.
+    void ForgetSectionBytes() { sectionFiles_.assign(table_.Sections().size(), {}); }
     const Preculler&    Visibility() const { return preculler_; }
     // The layout file (L4Rx.BUN) as shipped, and the spans the models folder
     // lays over it and the stream.
@@ -194,6 +222,12 @@ public:
     // How many material slots draw with this texture.
     u32 TextureUsage(u32 hash) const;
 
+    // World equivalents of the procedural road textures. Zero leaves the texture unchanged.
+    u32 NativeRoadTexture(const std::string& texture) const;
+
+    // A point on a road surface suitable for placing the mesh, including geometry stored in map coordinates.
+    std::optional<Vec3> RoadPlacementAnchor(const PlacedInstance& placement) const;
+
     // Looks a model up by hash across every section loaded so far. Scenery
     // instances reference models that live in a different section, usually the
     // shared library the region loads first. A hash the region does not
@@ -211,6 +245,34 @@ public:
 
     // The moving scenery of the layout file: doors, planes, cranes, trams.
     const WorldAnimations& ObjectAnimations() const { return objectAnimations_; }
+
+    // NFS World's baked scenery animation, by scenery instance GUID.
+    const std::unordered_map<u32, NfswObjectAnimation>& SceneryAnimations() const {
+        return sceneryAnimations_;
+    }
+
+    // NFS World holiday/event scenery (server's SCENERY_GROUP_* lists).
+    // Selecting a group set only changes the visibility filter; the renderer
+    // asks HolidayHides() for each shipped instance.
+    void SetHoliday(Holiday holiday);
+    Holiday CurrentHoliday() const { return holiday_; }
+    bool HolidayHides(u32 sectionNumber, int instance) const;
+    size_t SceneryGroupCount() const { return sceneryGroups_.size(); }
+    size_t SceneryOverrideCount() const;
+    // Some 0x34106 records register an ordinary placement rather than
+    // attaching it to an event. Return the registered instance's low flags.
+    bool PlainSceneryFlags(u16 entry, u32 chunk, u32 record, u16& flags) const;
+    std::optional<NfswSmackablePlacement> SmackablePlacement(const LoadedSection& section, size_t index) const;
+    const NfswSmackableLink* FindSmackableLink(const LoadedSection& section, size_t index) const;
+    bool RebindSmackable(LoadedSection& section, size_t index, u32 key) const;
+    bool RebindSmackable(LoadedSection& section, PlacedInstance& instance, u32 key);
+    bool ResizeSmackableBox(LoadedSection& section, size_t index, const NfswSmackableHalfSizes& sizes);
+    bool ResizeSmackableBox(LoadedSection& section, PlacedInstance& instance, const NfswSmackableHalfSizes& sizes);
+    const NfswSmackableAttributes* FindSmackableAttributes(u32 key) const;
+    bool ReloadSmackableAttributes();
+    std::wstring NfswAttributesFile(bool* overlay = nullptr) const;
+    bool UsesSmackableAttributeOverlay() const { return smackableAttributeOverlay_; }
+    size_t HolidayHiddenCount() const { return holidayHidden_.size(); }
     // Moving scenery shown but not part of the region (WorldAnimations::SetExtraPlacements).
     void SetPreviewAnimations(std::vector<WorldAnimationPlacement> extra) {
         objectAnimations_.SetExtraPlacements(std::move(extra));
@@ -241,7 +303,8 @@ public:
 
     // A section of the second set (Section::IsAlternate) that no visibility
     // list of the game loads: a true alternative, hidden unless asked for.
-    // Without visibility lists, the second set as a whole.
+    // Without visibility lists, the second set as a whole. NFS World marks no
+    // section IsAlternate: its +400 siblings are additional layers.
     bool IsUnusedAlternate(const Section& section) const {
         return section.IsAlternate() && (preculler_.IsEmpty() || !preculler_.Listed(section.number));
     }
@@ -269,6 +332,7 @@ public:
 
 private:
     std::wstring region_;
+    std::wstring tracksDirectory_;
     bool emptyCity_ = false;
     bool foreignLookup_ = true;
     FileMap      layout_;   // L4Rx.BUN
@@ -279,19 +343,64 @@ private:
     Game         game_ = Game::Underground2;
     u32          trackNumber_ = 0;
     bool OpenUnderground1(const std::wstring& tracksDirectory, const std::wstring& region);
+    bool OpenNfsw(const std::wstring& tracksDirectory, const std::wstring& region);
+    std::pair<LoadedSection*, size_t> SmackableSource(const PlacedInstance& instance);
+    // NFS World: bytes of each section file, read on first use. mutable because
+    // SectionBytes and the const lookups that reach it load lazily.
+    mutable std::vector<std::vector<u8>> sectionFiles_;
+    NfswSmackableTypes smackableTypes_;
+    NfswSmackableCatalog smackableAttributes_;
+    bool smackableAttributeOverlay_ = false;
+    std::wstring NfswSectionPath(size_t index) const;
     // Underground 1's collision, one pack per drivable section (by zone).
     std::unordered_map<u32, CollisionPack> trackCollision_;
     void SplitTrackCollision();
     void NameUnderground1Scenery(LoadedSection& section) const;
     FileMap      stream_;   // STREAML4Rx.BUN
     std::vector<std::unique_ptr<FileMap>>     globalFiles_;
+    std::vector<std::vector<u8>>              globalData_;   // decompressed .lzc payloads
     std::vector<std::unique_ptr<TexturePack>> globalPacks_;
     void OpenGlobalPacks(const std::wstring& tracksDirectory);
     SectionTable table_;
     std::vector<std::string> raceGroups_;
     std::unordered_map<u32, TextureAnimation> textureAnimations_;
+    // NFS World layout 0x34109: group hash -> 0x34108 table entries.
+    struct SceneryGroup {
+        u16              id = 0;
+        std::vector<u16> entries;
+    };
+    std::unordered_map<u32, SceneryGroup> sceneryGroups_;
+    // The 0x34108 table, dense by entry: which scenery chunk's which record
+    // the entry names, with the entry's own flags. This is the complete
+    // source -- the per-section 0x34106 lists only cache part of it.
+    struct SceneryEntry {
+        u32 chunk = 0;     // the scenery chunk's own 0x34101 number
+        u16 instance = 0;  // record index inside that chunk
+        u16 flags = 0;
+    };
+    std::vector<SceneryEntry> sceneryEntries_;
+    // One scenery chunk's records as the renderer sees them: the file section
+    // the chunk lives in and each record's index into that section's
+    // Scenery::instances (~0u when the record was dropped).
+    struct ChunkInstances {
+        u32 section = 0;
+        std::vector<u32> recordToInstance;
+    };
+    std::unordered_map<u32, ChunkInstances> chunkInstances_;
+    std::unordered_set<u64> holidayHidden_;
+    Holiday holiday_ = Holiday::Normal;
+    void ReadSceneryGroups(ByteSpan layout);
+    // Entry flags 0x10 marks a group-driven placement (DisableAllSceneryGroups
+    // sets 0x18 on every member when it turns the groups off, and every
+    // holiday / Top Gear / barrier entry carries it; the 22,705-entry
+    // bookkeeping group does not).
+    void HideEntry(size_t entry);
+    void HideSceneryGroup(u32 hash, bool hide);
     WorldAnimations objectAnimations_;
+    std::unordered_map<u32, NfswObjectAnimation> sceneryAnimations_;
     void ReadTextureAnimations(const Chunk& chunk);
+    // NFS World's 0xB3312004 frame animations, keyed by their first frame.
+    void RegisterNfswAnimations(const TexturePack& pack);
     void ReadRaceBarrierGroups();
 
     std::wstring overlayFolder_;

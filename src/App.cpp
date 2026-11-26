@@ -84,6 +84,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand) {
             ::GetClassNameW(::GetFocus(), focusClass, 16);
             const bool typing = ::lstrcmpiW(focusClass, L"Edit") == 0 || window.WantsTextInput();
 
+            if (!typing && window.HandleToolShortcut(message)) continue;
             if (typing || !::TranslateAcceleratorW(window.Handle(), window.Accelerators(), &message)) {
                 ::TranslateMessage(&message);
                 ::DispatchMessageW(&message);

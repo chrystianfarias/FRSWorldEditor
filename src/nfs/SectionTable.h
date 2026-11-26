@@ -38,12 +38,22 @@ struct Section {
     u32 originalOtherSize    = 0;
     u32 hash  = 0;
 
+    // NFS World keeps one file per section. `streamHash` is the value the game
+    // puts in the file name: zero means STREAM<region>_<number>.BUN, otherwise
+    // STREAM<region>_0x<hash>.BUN. `fileSize` and `bufferSize` are the two
+    // sizes at +0x60/+0x68; for a positioned section fileSize is its length.
+    u32 streamHash = 0;
+    u32 uid        = 0;
+    u32 fileSize   = 0;
+    u32 bufferSize = 0;
+
     // Three floats at +0x24. The first two are the section centre on the ground
     // plane; the third is either the centre height or a bounding radius, so it
     // is kept raw and only used for display until geometry confirms which.
     Vec3 position;
 
     bool HasTexturePack() const { return geometrySize != streamSize; }
+    bool IsNfswLibrary() const { return streamHash != 0; }
 
     // A region ships two sets of sections. The ordering key separates them:
     // 10000-19999 is one set of 255 sections, 20000-29999 another of 112.
@@ -52,6 +62,8 @@ struct Section {
     // of the Arco tower, whose windows are in M31 -- so a section of the
     // second set is only an alternative when no list ever loads it
     // (World::IsUnusedAlternate, which asks the visibility lists).
+    // NFS World leaves every order at 0: its +400 siblings are additional
+    // placement layers, not alternatives.
     bool IsAlternate() const { return order >= 20000; }
 };
 
@@ -61,6 +73,11 @@ public:
     // Parses chunk 0x00034110 out of an already-mapped L4Rx.BUN, or
     // Underground 1's chunk 0x00034107 out of an unpacked TRACKB<n>.LZC.
     bool Parse(ByteSpan bunFile);
+
+    // NFS World's 0x00034110: 208-byte entries. The section has no position
+    // when it is one of the shared library blocks (U..Y); those are loaded by
+    // streamHash, positioned A..G sections by number.
+    bool ParseNfsw(ByteSpan bunFile);
 
     const std::vector<Section>& Sections() const { return sections_; }
 

@@ -49,7 +49,8 @@ bool ChunkReader::Next(Chunk& out) {
         // The filler is only present when the writer needed it. Some chunks sit
         // on an unaligned offset and start with real data that happens to be
         // zero, so the padding is accepted only when every byte really is 0x11.
-        u64 filler = AlignUp(rawFileOffset, PayloadAlignment(id)) - rawFileOffset;
+        const u32 alignment = alignmentOverride_ ? alignmentOverride_ : PayloadAlignment(id);
+        u64 filler = AlignUp(rawFileOffset, alignment) - rawFileOffset;
         if (filler > size || !IsFiller(raw.data, (size_t)filler))
             filler = 0;
 

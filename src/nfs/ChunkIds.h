@@ -16,12 +16,28 @@ enum ChunkId : u32 {
     kChunkSceneryHeader      = 0x00034101,
     kChunkSceneryInfos       = 0x00034102,  // model name + hash per unique model
     kChunkSceneryInstances   = 0x00034103,  // placement of each model in the world
+    kChunkSceneryInstanceBindings = 0x0003410D, // 32-byte bindings for a prefix of the instances
+    kChunkSceneryCullTree    = 0x00034105, // 48-byte nodes, negative child / positive instance
+    kChunkSceneryPrecullBoxes = 0x0003410E, // 32-byte cull boxes, not in instance order
+    kChunkSceneryPrecullNodes = 0x0003410F, // 32-byte entries: instance index at +0x10
     kChunkSceneryGroups      = 0x00034104,
     kChunkSceneryOverrides   = 0x00034106,
+    // Vectorized culling: 64 records of {u32 view type, count, first, first,
+    // flags}. Each record names a contiguous range of 0x3410E/0x3410F
+    // entries; the renderer submits only those ranges, so a record appended
+    // past every range is invisible even when 0x34105 names it.
+    kChunkSceneryVectorized  = 0x00034C03,
+    // NFS World's baked object animation, stored beside the scenery container.
+    kChunkSceneryAnimHeader  = 0x00037220,  // pack header: section and track count
+    kChunkSceneryAnimFrames  = 0x00037240,  // N x 64-byte row-major transforms
+    kChunkSceneryAnimNode    = 0x00037250,  // one track: GUID, section, frame count
+    kChunkSceneryAnimTree    = 0x00037260,  // number of nodes that follow
+    kChunkSceneryAnimEnd     = 0x00037270,  // end of one pack
     kChunkSectionTable       = 0x00034110,  // streaming sections: offset/size into STREAMx.BUN
     kChunkVisibleSections    = 0x80034150,
 
     // --- Collision, one pack per streaming section ------------------------------
+    kChunkSmackableSpawners  = 0x00034027,
     kChunkCollisionPack      = 0x80034130,
     kChunkCollisionHeader    = 0x00034131,  // section number, grid size, bounds
     kChunkCollisionPolygons  = 0x00034134,  // 32-byte fixed-point ground polygons and barriers

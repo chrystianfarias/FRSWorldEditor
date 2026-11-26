@@ -26,6 +26,7 @@ struct CollisionToolsHost {
     std::function<nfs::World*()> world;
     std::function<void(const std::wstring&)> status;   // the status bar's message part
     std::function<void()> menuChecks;                   // the window's UpdateMenuChecks
+    std::function<bool()> activateTool;
 };
 
 // Collision editing inside the editor: the Collision menu, the drawing tools
@@ -65,6 +66,8 @@ public:
     void UpdateMenuChecks(HMENU menu) override;
     void OnRegionLoaded() override;
     void OnRegionClosed() override;
+    bool ToolActive() const override { return moving_ || mode_ != Mode::None; }
+    void CloseTools() override;
     bool StatusText(std::wstring& text) const override;
     bool FillProperties(PropertiesPanel::View& view) override;
     bool ApplyProperties() override;
@@ -101,7 +104,7 @@ private:
     void ExtendAccelerators();
 
     // Collision for the selected objects, from their meshes.
-    void GenerateForSelection();
+    void GenerateForSelection(bool roadGround = false);
 
     // --- the undo history ----------------------------------------------------
     // What each step is, newest last: a collision edit (taken back by the
@@ -132,6 +135,12 @@ private:
     // The point a click at (x, y) would place, snapped. False over nothing.
     bool PointUnder(int x, int y, Vec3& point) const;
 
+    // NFS World: the surface hashes the shipped Z0 packs use, what a new wall
+    // or ground can honestly be made of, and the menu label for one.
+    void RefreshWorldSurfaces();
+    std::wstring WorldSurfaceLabel(u32 hash) const;
+    void SetSelectionWorldSurface(size_t index);
+
     std::vector<collision::PolygonRef> SelectionRefs() const;
     void SelectRefs(const std::vector<collision::PolygonRef>& refs);
     void SetSelectionSurface(u8 surface);
@@ -155,6 +164,13 @@ private:
     float wallHeight_ = 3.0f;
     u8 groundSurface_ = nfs::kSurfaceRoad;
     u8 wallSurface_ = nfs::kSurfaceSolidWall;
+    // NFS World picks: native surface hashes (empty until a World region loads).
+    std::vector<u32> worldSurfaces_;
+    u32 worldWallSurface_ = nfs::kSolidSurface;
+    u32 worldGroundSurface_ = nfs::kRoadSurface;
+    // World has no unbounded barrier record of its own; its "barrier" is a
+    // wall of this height, which nothing in play clears.
+    static constexpr float kNfswBarrierHeight = 30.0f;
 
     bool  moving_ = false;
     float movePlane_ = 0.0f;       // height of the plane the drag is measured on

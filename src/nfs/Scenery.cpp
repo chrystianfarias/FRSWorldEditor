@@ -1,5 +1,7 @@
 #include "nfs/Scenery.h"
 
+#include "nfs/ByteRead.h"
+
 #include "core/Log.h"
 
 #include <algorithm>
@@ -42,19 +44,6 @@ constexpr size_t kU1InstRotation      = 0x1C;
 // The rotation matrix is fixed point with 1.0 stored as 0x2000. Scale is baked
 // into it, so the rows are only unit length for instances drawn at 1:1.
 constexpr float kRotationScale = 1.0f / 8192.0f;
-
-Vec3 ReadVec3(ByteSpan span, size_t offset) {
-    return { span.read<float>(offset),
-             span.read<float>(offset + 4),
-             span.read<float>(offset + 8) };
-}
-
-std::string ReadName(ByteSpan span, size_t offset, size_t capacity) {
-    if (offset >= span.size) return {};
-    const size_t available = std::min(capacity, span.size - offset);
-    const char* text = (const char*)span.data + offset;
-    return std::string(text, ::strnlen(text, available));
-}
 
 Mat4 ReadTransform(ByteSpan entry, size_t rotationAt = kInstRotation, size_t translationAt = kInstTranslation) {
     Mat4 m = Mat4::Identity();

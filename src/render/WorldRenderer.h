@@ -4,6 +4,7 @@
 #include "render/CollisionMesh.h"
 #include "render/D3D9Context.h"
 #include "render/GameLook.h"
+#include "nfs/StreamingModel.h"
 #include "render/Gizmo.h"
 #include "render/GpuResources.h"
 // MINIMAP PREVIEW (temporary)
@@ -114,6 +115,8 @@ struct GpuInstance {
 
     int  placement = -1;     // index into the section's editor placements, or -1
     int  native    = -1;     // index into the section's shipped scenery, or -1
+    u32  guid      = 0;      // NFS World scenery GUID, for baked object animation
+    u32  sceneryNumber = 0;  // the 0x34101 chunk number; a file can hold several
 
     // The road reflection (Game look). The game draws an instance into it when
     // its flags (+0x1A) have 0x40 and neither 0x10 nor 0x400, with the model of
@@ -178,8 +181,12 @@ public:
     bool CullingEnabled() const { return culling_; }
     void SetCullingEnabled(bool enabled) { culling_ = enabled; }
 
-    bool BackfaceCullingEnabled() const { return backfaceCulling_; }
-    void SetBackfaceCullingEnabled(bool enabled) { backfaceCulling_ = enabled; }
+    bool BackfaceCullingEnabled() const {
+        return world_ && world_->IsWorld() ? worldBackfaceCulling_ : backfaceCulling_;
+    }
+    void SetBackfaceCullingEnabled(bool enabled) {
+        (world_ && world_->IsWorld() ? worldBackfaceCulling_ : backfaceCulling_) = enabled;
+    }
 
     // The painted backdrop encloses the city, so it is hidden by default.
     bool BackdropVisible() const { return showBackdrop_; }
@@ -188,6 +195,11 @@ public:
     // Scenery instances are the world. Hiding them leaves an empty region.
     bool SceneryVisible() const { return showScenery_; }
     void SetSceneryVisible(bool visible) { showScenery_ = visible; }
+
+    // Diagnostic only: draw the engine shadow/reflection proxies and the
+    // CU_SHBLOCK block-out shells that the game view skips.
+    bool ProxiesVisible() const { return showProxies_; }
+    void SetProxiesVisible(bool visible) { showProxies_ = visible; }
 
     // The second set of sections. Off by default: where it overlaps the first
     // set it is an alternative version of the same streets, not more of them.
@@ -212,6 +224,13 @@ public:
     // visibility lists are read.
     bool StreamingEnabled() const { return streaming_; }
     void SetStreamingEnabled(bool enabled) { streaming_ = enabled; }
+
+    // Resets every editor-only hide and shows the layers the game draws:
+    // zone visibility, backdrops, scenery, sky, no library/alternate/collision
+    // overlays, no distant-LOD/background hides, no tool model filters. The
+    // structural proxy/backdrop/block-out classifications and identity dedupe
+    // stay; those are not editor visibility toggles.
+    void ApplyGameStandardView();
 
     // The collision the game drives on, drawn over the world. It follows the
     // same streaming as the geometry, so what shows is the collision of the
@@ -499,6 +518,8 @@ private:
     struct SectionRender {
         std::unique_ptr<GpuSection> gpu;
         std::unique_ptr<CollisionMesh> collision;
+        bool hasPlacementCollision = false;
+        bool collisionPreviewDirty = false;
         std::vector<GpuInstance>    instances;
         Aabb                        instanceBounds;   // what the section places
         Aabb                        libraryBounds;    // where its meshes are stored
@@ -610,8 +631,10 @@ private:
     RenderMode mode_ = RenderMode::Textured;
     bool       culling_ = true;
     bool       backfaceCulling_ = true;
+    bool       worldBackfaceCulling_ = false;
     bool       showBackdrop_ = false;
     bool       showScenery_ = true;
+    bool       showProxies_ = false;
     bool       showLibrary_ = false;
     bool       showAlternate_ = false;
     bool       showCollision_ = false;
@@ -621,6 +644,13 @@ private:
     bool       scrolling_ = false;   // texture stage 0 has a scroll transform on
     void ScrollTextureStage(IDirect3DDevice9* device, const CachedTexture& texture);
     bool       showSky_ = true;
+    // NFS World ships no SKYDOME backdrop model: DrawSky builds a dome from
+    // the GLOBAL sky bands instead, round the camera.
+    IDirect3DVertexBuffer9* worldSkyVertices_ = nullptr;
+    IDirect3DIndexBuffer9*  worldSkyIndices_ = nullptr;
+    unsigned                worldSkyBands_ = 0;
+    bool                    BuildWorldSky();
+    void                    DrawWorldSky(IDirect3DDevice9* device, const Camera& camera, RenderStats& stats);
     double     animationClock_ = 0.0;
     // The texture to draw for a material's: the frame of the moment when it
     // is animated.
@@ -632,12 +662,19 @@ private:
     // Off by default: the whole region drawn at once is what editing wants;
     // streaming shows what the game would have loaded, a question asked less.
     bool       streaming_ = false;
+    bool       gameZoneFallback_ = false;   // no zone: draw n%1000<10 (decompiled game fallback)
     // The visible set for the camera's current zone, recomputed only when the
     // camera leaves the zone it was in: the lists are stable over a whole city
     // block and testing every polygon each frame would be wasted work.
     mutable std::vector<u32> visibleSections_;
     mutable Vec3             visibleFrom_;
     mutable bool             haveVisible_ = false;
+    // The zone whose list is in visibleSections_; the list is kept while the
+    // camera stays inside it, as the game keeps the car's zone.
+    mutable u32              visibleZoneId_ = 0;
+    mutable double           visibleZoneChanged_ = 0.0;
+    nfs::StreamingModel      streamingModel_;
+    bool                     streamingModelReady_ = false;
     float      streamRadius_ = 400.0f;
     DWORD      cullMode_ = D3DCULL_CW;
     bool       worldOnly_ = false;   // inside RenderWorldOnly: stop after the blended surfaces
@@ -704,6 +741,12 @@ private:
     void UpdateGameZone(const Vec3& eye);
     bool BackdropOutOfZone(const GpuObject& object, u32 sectionNumber) const;
 
+    // NFS World's zone polygons do not cover the whole-map overview camera.
+    // With no zone claimed, draw every section instead of distance-culling to
+    // an empty view; inside a zone the visibility list takes over anyway.
+    bool DistanceCulls() const;
+    void ApplyBaseVisibility();
+
     // MINIMAP PREVIEW (temporary)
     minimap::Preview minimapPreview_;
     bool showMinimap_ = false;
@@ -721,6 +764,13 @@ private:
     bool HiddenModel(const GpuObject& object) const {
         return (object.raceProp && !showRaceProps_) ||
                (hiddenModels_ && object.source && hiddenModels_(*object.source));
+    }
+    // Holiday groups own race barriers too. The explicit barrier toggle is
+    // allowed to reveal those, while every other group member stays filtered.
+    bool InstanceHolidayHidden(u32 sectionNumber, int native, const GpuObject* object) const {
+        if (!world_ || !world_->IsWorld() || !world_->HolidayHides(sectionNumber, native))
+            return false;
+        return !(showRaceProps_ && object && object->raceProp);
     }
 
     // The sections whose collision was drawn last frame, so picking only finds

@@ -29,6 +29,7 @@ namespace nfs { class World; struct SolidObject; }
 namespace collision {
 
 enum class GeneratedShape { Solid, Drivable };
+enum class GenerateMode { Automatic, SolidWalls, GroundOnly };
 
 struct GenerateResult {
     GeneratedShape shape = GeneratedShape::Solid;
@@ -43,6 +44,14 @@ constexpr size_t kMaxGround = 2000;
 // gives the ground under it, which sets the foot of the walls.
 GenerateResult GenerateObjectCollision(const nfs::SolidObject& model, const Mat4& transform,
                                        const nfs::World* world,
-                                       std::vector<nfs::CollisionPolygon>& out);
+                                       std::vector<nfs::CollisionPolygon>& out,
+                                       GenerateMode mode = GenerateMode::Automatic);
+
+// Removes road triangles already covered at the same deck height.
+size_t RemoveCoveredRoadGround(const nfs::World& world, std::vector<nfs::CollisionPolygon>& ground);
+
+// Shapes shared by the World placement preview and the overlay writer.
+void GenerateNfswPlacementCollision(const nfs::SolidObject& model, const Mat4& transform,
+                                    std::vector<nfs::CollisionPolygon>& out);
 
 } // namespace collision

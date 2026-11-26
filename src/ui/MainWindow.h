@@ -35,6 +35,7 @@ public:
     HACCEL Accelerators() const { return accelerators_; }
     // A panel's text field has the keyboard, so shortcuts leave the keys to it.
     bool WantsTextInput() const { return viewport_.UiWantsText(); }
+    bool HandleToolShortcut(const MSG& message);
 
 
     // The modeless texture browser, for the same reason.
@@ -67,6 +68,7 @@ private:
     void LoadPanelSizes();
     void StorePanelSizes() const;
     void OnCommand(int id, int notification, HWND control);
+    bool ActivateViewportTool(const EditorExtension* owner);
 
     void RunSetup();
 
@@ -126,6 +128,8 @@ private:
     // Fills the properties panel from the selection, and takes its edits back.
     void UpdateProperties();
     void ApplyPropertyFields(bool rehome);
+    void ApplySmackableBinding();
+    void ApplySmackableBox();
     // `onlyMine` opens the list on the objects made in this editor.
     void PlaceObject(bool onlyMine = false);
     // Where a new placement goes: the ground under the view centre, and the
@@ -171,7 +175,7 @@ private:
 
     // The extension that owns a catalogue or edits row, or null.
     EditorExtension* ExtensionOf(const void* owner) const;
-    bool SavePlacements();
+    bool SavePlacements(bool refreshWorldCollision = false);
     bool HasUnsavedPlacements() const;
     // Asks what to do with unsaved placements. False means stay.
     bool ConfirmUnsavedPlacements();
@@ -198,6 +202,7 @@ private:
     // shape in it is a new object.
     void ImportObj(const std::wstring& path, bool quick, const Vec3* newOrigin = nullptr);
     void ShowEditedMeshes();
+    void ImportWorldAttributes();
 
     // Objects > Edit in Blender: exports the selection to a folder of its own,
     // opens it in Blender, and imports it again each time Blender saves.
@@ -212,6 +217,8 @@ private:
     void CloseRegion();
 
     void LoadAllSections();
+    // NFS World only: switches the holiday scenery group filter.
+    void SetHoliday(nfs::Holiday holiday);
     void PopulateSectionTree();
     void OnSectionSelected();
     // For a row of the tree (its lParam): the extension's TreeItemMark, -1
@@ -337,6 +344,7 @@ private:
     std::vector<nfs::PlacedInstance> clipboard_;
 
     BlenderLink blender_;
+    std::wstring blenderWorldProject_;
     ModelThumbnails thumbnails_;          // pictures for the Place Object catalogue
     // Models whose picture is not on disk yet, drawn in the background after a
     // region loads so the catalogue opens on finished pictures.

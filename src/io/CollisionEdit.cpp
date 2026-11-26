@@ -1,6 +1,7 @@
 #include <windows.h>
 
 #include "io/CollisionEdit.h"
+#include "nfs/NfswCollision.h"
 
 #include "core/Log.h"
 #include "io/SectionEdits.h"
@@ -167,13 +168,14 @@ void AppendWall(const std::vector<Vec3>& points, const WallOptions& options,
     const float sink = std::clamp(options.sink, 0.0f, 20.0f);
     const float piece = std::max(1.0f, options.maxPiece);
 
-    // Points closer than a quarter metre in plan are one point.
+    // Coalesce neighbouring points in plan before building the faces.
     std::vector<Vec3> line;
     for (const Vec3& p : points)
-        if (line.empty() || std::hypot(p.x - line.back().x, p.y - line.back().y) >= 0.25f) line.push_back(p);
+        if (line.empty() || std::hypot(p.x - line.back().x, p.y - line.back().y) >= options.minSpacing)
+            line.push_back(p);
     if (line.size() < 2) return;
     const bool closed = line.size() > 2 && std::hypot(line.front().x - line.back().x,
-                                                      line.front().y - line.back().y) < 0.25f;
+                                                      line.front().y - line.back().y) < options.minSpacing;
     if (closed) line.back() = line.front();
 
     // One face per piece along a polyline; it faces the left of the way the
@@ -400,6 +402,15 @@ bool Editor::Undo() {
 std::vector<std::pair<u32, u32>> Editor::PacksFor(const nfs::CollisionPolygon& polygon) const {
     std::vector<std::pair<u32, u32>> out;
     if (!world_) return out;
+    if (world_->IsWorld()) {
+        if (polygon.barrier) return out;
+        const auto& loaded = world_->Loaded();
+        for (size_t i = 0; i < loaded.size(); ++i)
+            if (loaded[i]->info && loaded[i]->info->number == nfs::kNfswCollisionSection &&
+                !loaded[i]->collision.empty())
+                return { { (u32)i, 0 } };
+        return out;
+    }
 
     // Where to look: the corners, the middle, and for walls the middle of the
     // segment -- what decides which sections' ground it stands on.
@@ -626,7 +637,7 @@ size_t Editor::Remove(const std::vector<PolygonRef>& refs) {
     return all.size();
 }
 
-size_t Editor::SetSurface(const std::vector<PolygonRef>& refs, u8 surface) {
+size_t Editor::SetSurface(const std::vector<PolygonRef>& refs, u8 surface, u32 nfswSurface) {
     const std::vector<PolygonRef> all = WithCopies(refs);
     if (all.empty()) return 0;
     std::vector<std::pair<u32, u32>> packs;
@@ -638,6 +649,7 @@ size_t Editor::SetSurface(const std::vector<PolygonRef>& refs, u8 surface) {
         nfs::CollisionPolygon& polygon = pack->polygons[ref.polygon];
         polygon.attributes[2] = surface;
         polygon.SyncFromAttributes();
+        if (nfswSurface) polygon.nfswSurface = nfswSurface;
         Changed(ref.section, ref.pack);
     }
     return all.size();

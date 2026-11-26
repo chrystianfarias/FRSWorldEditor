@@ -25,6 +25,8 @@ public:
     virtual bool MouseWheel(int notches, WPARAM keys) { (void)notches; (void)keys; return false; }
     // The left button let go (after a MouseDown the tool took).
     virtual bool MouseUp(int x, int y, WPARAM keys) { (void)x; (void)y; (void)keys; return false; }
+    virtual bool DraggingPointer() const { return false; }
+    virtual void CancelPointerDrag() {}
     // `repeat` is the keyboard's auto-repeat.
     virtual bool KeyDown(WPARAM key, bool repeat) { (void)key; (void)repeat; return false; }
     // Something of the tool's own under the gizmo -- vertices being edited:
@@ -96,6 +98,10 @@ public:
     enum class TransformMode { None, Move, Rotate };
     bool BeginTransform(TransformMode mode);
     bool Transforming() const { return transform_ != TransformMode::None; }
+    void CancelDrag() {
+        if (GizmoDragging()) EndGizmoDrag(false);
+        if (Transforming()) EndTransform(false);
+    }
 
     // Something that is one point with a heading rather than a placement --
     // an extension's own (ui/EditorExtension.h) -- moved and turned by the same G and R. `get`
@@ -194,6 +200,9 @@ private:
     // editor placement the moment a drag begins (DetachNatives).
     static constexpr int kGizmoNative = -4;
     bool GizmoTarget(u32& section, int& placement, Mat4& transform) const;
+    Vec3 ObjectPivot(const nfs::SolidObject* model) const;
+    mutable const nfs::SolidObject* pivotModel_ = nullptr;
+    mutable Vec3 modelPivot_;
     static float PointHeading(const Mat4& transform);
     Mat4  gizmoNow_;                    // a point's transform as the drag left it
     GizmoView CurrentGizmoView() const;
@@ -206,6 +215,7 @@ private:
     u32   gizmoSection_ = 0;
     int   gizmoPlacement_ = -1;
     Mat4  gizmoStart_;
+    Vec3  gizmoLocalPivot_;
     Vec2  gizmoMouseStart_;
     float gizmoAxisStart_ = 0.0f;       // where along the axis the grab began
     Vec3  gizmoPlaneStart_;             // where on the ground plane it began

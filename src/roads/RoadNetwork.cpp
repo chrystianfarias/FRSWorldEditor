@@ -384,8 +384,23 @@ void BuildStretch(const RoadProfile& p, const std::vector<Station>& stations, si
             AddQuad(g, Vertex(at(s0, -half, 0), up, u0, v0, color), Vertex(at(s0, half, 0), up, u1, v0, color),
                     Vertex(at(s1, half, 0), up, u1, v1, color), Vertex(at(s1, -half, 0), up, u0, v1, color), up);
         }
+        for (const auto& band : p.surfaceBands) {
+            if (crossing) break;
+            MeshGroup& g = piece.Group(band.texture);
+            const float l = band.left * 2 * half, r = band.right * 2 * half;
+            const Vec3 a = at(s0, l, band.leftHeight), b = at(s0, r, band.rightHeight);
+            const Vec3 c = at(s1, r, band.rightHeight), d = at(s1, l, band.leftHeight);
+            Vec3 normal = Cross(b - a, d - a) + Cross(c - d, c - b);
+            normal = Length(normal) > 1e-5f ? Normalize(normal.z < 0 ? normal * -1.0f : normal) : up;
+            const auto vertex = [&](const Station& station, Vec3 position, const Vec2& uv) {
+                return Vertex(position, normal, uv.x + station.distance * band.uvPerMetre.x,
+                              uv.y + station.distance * band.uvPerMetre.y, color);
+            };
+            AddQuad(g, vertex(s0, a, band.leftUv), vertex(s0, b, band.rightUv),
+                    vertex(s1, c, band.rightUv), vertex(s1, d, band.leftUv), up);
+        }
         // Lanes.
-        for (size_t k = 0; k < paints.size() && !crossing; ++k) {
+        for (size_t k = 0; k < paints.size() && !crossing && p.surfaceBands.empty(); ++k) {
             const float x0 = laneStart(k);
             const float x1 = x0 + lane;
             const float u0 = paints[k].mirrored ? 1.0f : 0.0f;
@@ -399,7 +414,7 @@ void BuildStretch(const RoadProfile& p, const std::vector<Station>& stations, si
 
         // The shoulders: the lane texture across them from the lane's side,
         // so a line there keeps its width.
-        if (p.AnyShoulder() && !crossing) {
+        if (p.AnyShoulder() && !crossing && p.surfaceBands.empty()) {
             // A road strip across its width; striped, the hatching starts
             // from nothing where it narrows away (RDP_ROADSTRIP_MA).
             for (int side = -1; side <= 1; side += 2) {
@@ -432,7 +447,7 @@ void BuildStretch(const RoadProfile& p, const std::vector<Station>& stations, si
         }
 
         // The median.
-        if (median > 0.01f && !crossing) {
+        if (median > 0.01f && !crossing && p.surfaceBands.empty()) {
             const float m0 = medianLeft, m1 = medianLeft + median;
             const float v0 = s0.distance / p.textureLength, v1 = s1.distance / p.textureLength;
             if (medianOpen(s0, s1) || p.medianType == 1) {
@@ -634,7 +649,14 @@ void BuildStretch(const RoadProfile& p, const std::vector<Station>& stations, si
     };
     // The road, split along its lane lines (shoulders, lanes, median) as the
     // game's own road collision is, so no polygon spans the whole width.
-    {
+    if (!p.surfaceBands.empty()) {
+        for (const auto& band : p.surfaceBands) {
+            CollisionStrip road;
+            road.left = edge(band.left * 2 * half, band.leftHeight);
+            road.right = edge(band.right * 2 * half, band.rightHeight);
+            piece.strips.push_back(std::move(road));
+        }
+    } else {
         std::vector<float> lines{ -half };
         const auto add = [&](float x) {
             if (x > lines.back() + 0.25f && x < half - 0.25f) lines.push_back(x);
@@ -3012,6 +3034,15 @@ Curve Network::CurveOf(const Segment& segment) const {
     return curve;
 }
 
+Curve PenCurve(const Vec3& start, const Vec3& end, const Vec3& leaveStart, const Vec3& leaveEnd) {
+    const Vec3 chord = (end - start) * (1.0f / 3.0f);
+    const Vec3 rise{ 0.0f, 0.0f, chord.z };
+    const Vec3 a = Horizontal(leaveStart);
+    const Vec3 b = Horizontal(leaveEnd);
+    return { start, start + (Length(a) >= 0.01f ? a + rise : chord),
+                  end - (Length(b) >= 0.01f ? b + rise : chord), end };
+}
+
 bool Network::NearestOnSegment(const Segment& segment, const Vec3& point, float& t, float& distance) const {
     const Curve curve = CurveOf(segment);
     distance = 1e30f;
@@ -3912,6 +3943,7 @@ bool Network::Save(const std::wstring& path) const {
     out << "FRSROADS 2\n";
     if (fillBetween_) out << "fill 1\n";
     if (terrainCollision_) out << "terraincollision 1\n";
+    if (worldRoadTextures_) out << "worldroadtextures 1\n";
     out << "# node <id> <x> <y> <z> <hasHeading> <heading> <crosswalks>\n";
     out << "# segment <id> <a> <b> <lanesForward> <lanesBackward> <laneWidth> <textureLength> <laneCentre> "
            "<laneInner> <sidewalkWidth> <sidewalkHeight> <sidewalkTexture> <wallLeft> <wallRight> "
@@ -3965,8 +3997,16 @@ bool Network::Save(const std::wstring& path) const {
         out << " " << (p.tunnel ? 1 : 0) << " " << p.tunnelHeight << " " << p.tunnelShape << " "
             << p.tunnelLightSpacing << " " << p.tunnelLightColor << " " << p.tunnelPortalSize << " "
             << p.tunnelPortalDepth << " " << Token(p.tunnelWall) << " " << Token(p.tunnelRoof) << " "
-            << Token(p.tunnelPortal);
+            << Token(p.tunnelPortal) << " " << p.worldLaneProfile;
         out << "\n";
+        if (!p.surfaceBands.empty()) {
+            out << "roadtemplate " << s.id << " " << Token(p.surfaceTemplate) << " " << p.surfaceBands.size();
+            for (const auto& b : p.surfaceBands)
+                out << " " << Token(b.texture) << " " << b.left << " " << b.right << " " << b.leftHeight
+                    << " " << b.rightHeight << " " << b.leftUv.x << " " << b.leftUv.y << " "
+                    << b.rightUv.x << " " << b.rightUv.y << " " << b.uvPerMetre.x << " " << b.uvPerMetre.y;
+            out << "\n";
+        }
     }
     for (const Water& w : waters_) {
         out << "water " << w.id << " " << w.kind << " " << w.level << " " << w.depth << " " << w.width << " "
@@ -4088,6 +4128,9 @@ bool Network::Load(const std::wstring& path) {
         } else if (kind == "terraincollision") {
             int on = 0;
             if (line >> on) terrainCollision_ = on != 0;
+        } else if (kind == "worldroadtextures") {
+            int on = 0;
+            if (line >> on) worldRoadTextures_ = on != 0;
         } else if (kind == "node") {
             Node n;
             int heading = 0;
@@ -4160,6 +4203,26 @@ bool Network::Load(const std::wstring& path) {
             line >> c.node >> c.centre.x >> c.centre.y >> c.centre.z >> c.forward.x >> c.forward.y >> c.halfLength >>
                 c.halfWidth;
             if (line) cuts_.push_back(c);
+        } else if (kind == "roadtemplate") {
+            u32 id = 0;
+            size_t count = 0;
+            std::string source;
+            if (!(line >> id >> source >> count) || count < 1 || count > 128) continue;
+            Segment* road = FindSegment(id);
+            if (!road) continue;
+            std::vector<RoadProfile::SurfaceBand> bands;
+            for (size_t i = 0; i < count; ++i) {
+                RoadProfile::SurfaceBand b;
+                if (!(line >> b.texture >> b.left >> b.right >> b.leftHeight >> b.rightHeight
+                           >> b.leftUv.x >> b.leftUv.y >> b.rightUv.x >> b.rightUv.y >> b.uvPerMetre.x >> b.uvPerMetre.y) ||
+                    !(b.left >= -0.501f && b.right <= 0.501f && b.right > b.left)) break;
+                b.texture = Untoken(b.texture);
+                bands.push_back(std::move(b));
+            }
+            if (bands.size() == count) {
+                road->profile.surfaceTemplate = Untoken(source);
+                road->profile.surfaceBands = std::move(bands);
+            }
         } else if (kind == "segment") {
             Segment s;
             RoadProfile& p = s.profile;
@@ -4312,6 +4375,9 @@ bool Network::Load(const std::wstring& path) {
                                                                 p.tunnelWall = Untoken(tw);
                                                                 p.tunnelRoof = Untoken(tr);
                                                                 p.tunnelPortal = Untoken(tp);
+                                                                int profile = -1;
+                                                                if (line >> profile && profile >= 0 && profile <= UINT16_MAX)
+                                                                    p.worldLaneProfile = profile;
                                                             }
                                                         }
                                                     }

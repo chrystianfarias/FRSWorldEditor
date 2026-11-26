@@ -17,6 +17,9 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <set>
 
 namespace {
@@ -34,6 +37,7 @@ enum : int {
     kIdRaceGroups    = 44008,
     kIdMove          = 44009,
     kIdGenerate      = 44010,
+    kIdRoadGround    = 44011,
     kIdHeightFirst   = 44020,   // + preset index
     kIdSurfaceSelect = 44100,   // + surface index
     kIdSurfaceGround = 44200,
@@ -382,8 +386,25 @@ void CollisionTools::OnCreate() {
 
 void CollisionTools::BuildMenu() {
     if (!host_.menu) return;
-    const auto surfaces = [](int first) {
+    // A rebuild must not stack a second Collision menu on the bar.
+    if (popup_) {
+        const int count = ::GetMenuItemCount(host_.menu);
+        for (int i = 0; i < count; ++i)
+            if (::GetSubMenu(host_.menu, i) == popup_) {
+                ::RemoveMenu(host_.menu, i, MF_BYPOSITION);
+                break;
+            }
+        ::DestroyMenu(popup_);
+        popup_ = nullptr;
+    }
+    const auto surfaces = [this](int first) {
         HMENU menu = ::CreatePopupMenu();
+        if (!worldSurfaces_.empty()) {
+            for (size_t i = 0; i < worldSurfaces_.size(); ++i)
+                ::AppendMenuW(menu, MF_STRING, (UINT_PTR)(first + (int)i),
+                              WorldSurfaceLabel(worldSurfaces_[i]).c_str());
+            return menu;
+        }
         for (u8 s = 0; s < nfs::kSurfaceCount; ++s) {
             std::wstring text = Format(L"%02X  %s", s, SurfaceLabel(s).c_str());
             ::AppendMenuW(menu, MF_STRING, (UINT_PTR)(first + s), text.c_str());
@@ -414,6 +435,7 @@ void CollisionTools::BuildMenu() {
     ::AppendMenuW(popup_, MF_STRING, kIdDelete, L"&Delete Selection\tDel");
     ::AppendMenuW(popup_, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(popup_, MF_STRING, kIdGenerate, L"Make Collision for Selected &Objects\tCtrl+Shift+K");
+    ::AppendMenuW(popup_, MF_STRING, kIdRoadGround, L"Add Missing &Road Collision for Selection");
     ::AppendMenuW(popup_, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(popup_, MF_STRING, kIdUndo, L"&Undo (collision and objects)\tCtrl+Z");
     ::AppendMenuW(popup_, MF_STRING, ID_OBJECT_SAVE, L"Write Edits to the &Game\tCtrl+Shift+S");
@@ -448,11 +470,29 @@ void CollisionTools::UpdateMenuChecks(HMENU menu) {
     check(kIdBarrier, mode_ == Mode::Barrier);
     check(kIdWall, mode_ == Mode::Wall);
     check(kIdGround, mode_ == Mode::Ground);
+    const bool nfsw = World() && World()->IsWorld();
+    ::EnableMenuItem(menu, kIdRoadGround, MF_BYCOMMAND | (nfsw ? MF_ENABLED : MF_GRAYED));
+    for (int command : { kIdRaceGroups, kIdAlwaysPresent, kIdCopies })
+        ::EnableMenuItem(menu, command, MF_BYCOMMAND | (nfsw ? MF_GRAYED : MF_ENABLED));
     for (size_t i = 0; i < std::size(kHeights); ++i)
         check(kIdHeightFirst + (int)i, std::fabs(kHeights[i] - wallHeight_) < 0.01f);
-    for (u8 s = 0; s < nfs::kSurfaceCount; ++s) {
-        check(kIdSurfaceGround + s, s == groundSurface_);
-        check(kIdSurfaceWall + s, s == wallSurface_);
+    if (nfsw) {
+        // The World menus list the shipped native surface hashes.
+        for (size_t i = 0; i < nfs::kSurfaceCount; ++i) {
+            const bool listed = i < worldSurfaces_.size();
+            check(kIdSurfaceGround + (int)i, listed && worldSurfaces_[i] == worldGroundSurface_);
+            check(kIdSurfaceWall + (int)i, listed && worldSurfaces_[i] == worldWallSurface_);
+            for (int first : { kIdSurfaceGround, kIdSurfaceWall, kIdSurfaceSelect })
+                ::EnableMenuItem(menu, first + (int)i,
+                                 MF_BYCOMMAND | (listed ? MF_ENABLED : MF_GRAYED));
+        }
+    } else {
+        for (u8 s = 0; s < nfs::kSurfaceCount; ++s) {
+            check(kIdSurfaceGround + s, s == groundSurface_);
+            check(kIdSurfaceWall + s, s == wallSurface_);
+            for (int first : { kIdSurfaceGround, kIdSurfaceWall, kIdSurfaceSelect })
+                ::EnableMenuItem(menu, first + s, MF_BYCOMMAND | MF_ENABLED);
+        }
     }
     ::EnableMenuItem(menu, kIdUndo, MF_BYCOMMAND | (!history_.empty() || editor_.CanUndo() ? MF_ENABLED : MF_GRAYED));
 }
@@ -461,6 +501,17 @@ void CollisionTools::OnRegionLoaded() {
     StopTool();
     moving_ = false;
     editor_.SetWorld(World());
+    editor_.SetLogging(!World() || !World()->IsWorld());
+    if (World() && World()->IsWorld()) {
+        // The surface menus list what the shipped collision actually uses.
+        RefreshWorldSurfaces();
+        worldWallSurface_ = nfs::kSolidSurface;
+        worldGroundSurface_ = nfs::kRoadSurface;
+        BuildMenu();
+    } else if (!worldSurfaces_.empty()) {
+        worldSurfaces_.clear();
+        BuildMenu();
+    }
     // Every collision change kept so far, one by one (models\collision-<REGION>.txt).
     if (World()) {
         std::vector<collision::LogEntry> log;
@@ -472,7 +523,7 @@ void CollisionTools::OnRegionLoaded() {
     // A check of the whole edit path, run on the loaded region without
     // writing anything: set FRS_COLLISION_TOOLS_SELFTEST=1 before starting.
     static const bool selfTest = std::getenv("FRS_COLLISION_TOOLS_SELFTEST") != nullptr;
-    if (selfTest && World()) {
+    if (selfTest && World() && !World()->IsWorld()) {
         RunCollisionSelfTest(*World());
         editor_.SetWorld(World());
         for (size_t i = 0; i < World()->Loaded().size(); ++i) Renderer().RefreshCollision(i);
@@ -482,8 +533,47 @@ void CollisionTools::OnRegionLoaded() {
 
 std::wstring CollisionTools::LogPath() const {
     nfs::World* world = World();
-    if (!world || world->OverlayFolder().empty()) return L"";
+    if (!world || world->IsWorld() || world->OverlayFolder().empty()) return L"";
     return world->OverlayFolder() + L"\\collision-" + world->Region() + L".txt";
+}
+
+// The surface hashes the shipped Z0 packs use: what a new wall or ground can
+// honestly be made of. Null hashes stay out of the menu.
+void CollisionTools::RefreshWorldSurfaces() {
+    worldSurfaces_.clear();
+    nfs::World* world = World();
+    if (!world || !world->IsWorld()) return;
+    const nfs::Section* z0 = world->Table().FindByNumber(nfs::kNfswCollisionSection);
+    if (!z0) return;
+    std::ifstream in(world->TracksDirectory() + L"\\" + world->NfswSectionFileName(*z0),
+                     std::ios::binary);
+    if (!in) return;
+    std::vector<u8> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::map<u32, size_t> strips, boundaries;
+    nfs::NfswSurveyNativeSurfaces({ bytes.data(), bytes.size() }, strips, boundaries);
+    for (const auto& [hash, count] : strips)
+        if (hash) worldSurfaces_.push_back(hash);
+}
+
+std::wstring CollisionTools::WorldSurfaceLabel(u32 hash) const {
+    if (hash == nfs::kRoadSurface) return L"road";
+    if (hash == nfs::kSolidSurface) return L"solid wall";
+    wchar_t text[12];
+    std::swprintf(text, 12, L"%08X", hash);
+    return text;
+}
+
+void CollisionTools::SetSelectionWorldSurface(size_t index) {
+    if (index >= worldSurfaces_.size()) return;
+    const u32 hash = worldSurfaces_[index];
+    const auto refs = SelectionRefs();
+    if (refs.empty()) { Status(L"Select collision polygons first (Ctrl+K shows them)."); return; }
+    // The byte only picks the display colour; the hash is what gets written.
+    const u8 display = hash == nfs::kRoadSurface ? nfs::kSurfaceRoad : nfs::kSurfaceSolidWall;
+    const size_t changed = editor_.SetSurface(refs, display, hash);
+    RefreshAfterEdit();
+    Status(Format(L"%zu polygons are now %s (copies included; not written yet).", changed,
+                  WorldSurfaceLabel(hash).c_str()));
 }
 
 void CollisionTools::OnSaved() {
@@ -553,17 +643,40 @@ void CollisionTools::RefreshAfterEdit() {
 // ---------------------------------------------------------------------------
 
 bool CollisionTools::OnCommand(int id) {
+    const bool nfsw = World() && World()->IsWorld();
+    if (nfsw && (id == kIdAlwaysPresent || id == kIdCopies || id == kIdRaceGroups)) {
+        // The World static collision has no race groups and lives in one pack.
+        Status(L"NFS World has no race groups or section copies in its collision.");
+        return true;
+    }
     if (id >= kIdSurfaceSelect && id < kIdSurfaceSelect + nfs::kSurfaceCount) {
-        SetSelectionSurface((u8)(id - kIdSurfaceSelect));
+        if (nfsw) SetSelectionWorldSurface((size_t)(id - kIdSurfaceSelect));
+        else SetSelectionSurface((u8)(id - kIdSurfaceSelect));
         return true;
     }
     if (id >= kIdSurfaceGround && id < kIdSurfaceGround + nfs::kSurfaceCount) {
+        if (nfsw) {
+            if ((size_t)(id - kIdSurfaceGround) < worldSurfaces_.size()) {
+                worldGroundSurface_ = worldSurfaces_[id - kIdSurfaceGround];
+                Status(L"New ground will be " + WorldSurfaceLabel(worldGroundSurface_) + L".");
+                if (host_.menuChecks) host_.menuChecks();
+            }
+            return true;
+        }
         groundSurface_ = (u8)(id - kIdSurfaceGround);
         Status(L"New ground will be " + SurfaceLabel(groundSurface_) + L".");
         if (host_.menuChecks) host_.menuChecks();
         return true;
     }
     if (id >= kIdSurfaceWall && id < kIdSurfaceWall + nfs::kSurfaceCount) {
+        if (nfsw) {
+            if ((size_t)(id - kIdSurfaceWall) < worldSurfaces_.size()) {
+                worldWallSurface_ = worldSurfaces_[id - kIdSurfaceWall];
+                Status(L"New walls will be " + WorldSurfaceLabel(worldWallSurface_) + L".");
+                if (host_.menuChecks) host_.menuChecks();
+            }
+            return true;
+        }
         wallSurface_ = (u8)(id - kIdSurfaceWall);
         Status(L"New walls will be " + SurfaceLabel(wallSurface_) + L".");
         if (host_.menuChecks) host_.menuChecks();
@@ -585,6 +698,9 @@ bool CollisionTools::OnCommand(int id) {
         case kIdAlwaysPresent: ClearSelectionRaceGroup(); return true;
         case kIdCopies:  SelectCopies(); return true;
         case kIdMove:    BeginMove(); return true;
+        case kIdRoadGround:
+            if (World() && World()->IsWorld()) GenerateForSelection(true);
+            return true;
         case kIdGenerate:
         case IDC_PROP_COLLISION:
             GenerateForSelection();
@@ -789,21 +905,27 @@ void CollisionTools::Tick(float) {
 // Collision made from objects
 // ---------------------------------------------------------------------------
 
-void CollisionTools::GenerateForSelection() {
+void CollisionTools::GenerateForSelection(bool roadGround) {
     nfs::World* world = World();
     const auto& selection = Renderer().Selection();
     if (!world || selection.empty()) {
         Status(L"Select one or more objects first (with the collision hidden, Ctrl+K).");
         return;
     }
-    std::vector<nfs::CollisionPolygon> polygons;
+    const bool nfsw = world->IsWorld();
+    std::vector<nfs::CollisionPolygon> polygons, roadFaces;
     size_t solid = 0, drivable = 0, skipped = 0, walls = 0, ground = 0;
     bool capped = false;
     std::wstring why;
     for (const PickResult& picked : selection) {
         if (!picked.object) { ++skipped; continue; }
-        const collision::GenerateResult result =
-            collision::GenerateObjectCollision(*picked.object, picked.transform, world, polygons);
+        const auto mode = !nfsw ? collision::GenerateMode::Automatic
+            : roadGround || picked.object->IsTerrain() || picked.object->HasNfswRoadSurface()
+                ? collision::GenerateMode::GroundOnly : collision::GenerateMode::SolidWalls;
+        const bool worldGround = nfsw && mode == collision::GenerateMode::GroundOnly;
+        const collision::GenerateResult result = collision::GenerateObjectCollision(
+            *picked.object, picked.transform, worldGround ? nullptr : world,
+            worldGround ? roadFaces : polygons, mode);
         if (!result.walls && !result.ground) {
             ++skipped;
             if (why.empty()) why = Widen(picked.object->name) + L": " + result.note;
@@ -817,7 +939,14 @@ void CollisionTools::GenerateForSelection() {
                  result.shape == collision::GeneratedShape::Drivable ? "drivable" : "solid",
                  result.walls, result.ground);
     }
+    const size_t covered = collision::RemoveCoveredRoadGround(*world, roadFaces);
+    ground -= covered;
+    polygons.insert(polygons.end(), roadFaces.begin(), roadFaces.end());
     if (polygons.empty()) {
+        if (covered) {
+            Status(L"The selected road surface already has ground collision.");
+            return;
+        }
         Status(L"No collision made" + (why.empty() ? std::wstring(L".") : L" -- " + why));
         return;
     }
@@ -825,6 +954,11 @@ void CollisionTools::GenerateForSelection() {
     RefreshAfterEdit();
     if (!Renderer().CollisionVisible() && host_.window)
         ::SendMessageW(host_.window, WM_COMMAND, ID_VIEW_COLLISION, 0);
+    if (roadGround) {
+        Status(Format(L"%zu missing road faces added, %zu already covered. Ctrl+Z undoes; Ctrl+Shift+S writes.",
+                      added.size(), covered));
+        return;
+    }
     Status(Format(L"Collision made for %zu objects (%zu solid, %zu drivable%s): %zu walls, %zu ground, "
                   L"%zu stored%s. Ctrl+Z undoes; Ctrl+Shift+S writes.",
                   solid + drivable, solid, drivable,
@@ -850,6 +984,7 @@ bool CollisionTools::DeleteSelection() {
 // ---------------------------------------------------------------------------
 
 void CollisionTools::StartTool(Mode mode) {
+    if (mode != Mode::None && host_.activateTool && !host_.activateTool()) return;
     if (moving_) EndMove(false);
     points_.clear();
     mode_ = mode;
@@ -865,6 +1000,11 @@ void CollisionTools::StartTool(Mode mode) {
     }
     UpdateOverlay();
     if (host_.menuChecks) host_.menuChecks();
+}
+
+void CollisionTools::CloseTools() {
+    if (moving_) EndMove(false);
+    if (mode_ != Mode::None) StopTool();
 }
 
 void CollisionTools::StopTool() {
@@ -992,8 +1132,10 @@ void CollisionTools::UpdateOverlay() {
         }
     } else {
         const bool barrier = mode_ == Mode::Barrier;
+        const bool nfsw = World() && World()->IsWorld();
         const float below = barrier ? nfs::CollisionPack::kBarrierBelow : 0.5f;
-        const float above = barrier ? nfs::CollisionPack::kBarrierAbove : wallHeight_;
+        const float above = barrier && nfsw ? kNfswBarrierHeight
+                          : barrier ? nfs::CollisionPack::kBarrierAbove : wallHeight_;
         const D3DCOLOR fill = barrier ? 0x70FF3030 : 0x70FF8040;
         const D3DCOLOR edge = barrier ? 0xFFFFD040 : 0xFFFF8040;
         for (size_t i = 0; i + 1 < chain.size(); ++i) {
@@ -1010,6 +1152,7 @@ void CollisionTools::UpdateOverlay() {
 
 void CollisionTools::Finish() {
     if (mode_ == Mode::None) return;
+    const bool nfsw = World() && World()->IsWorld();
     std::vector<nfs::CollisionPolygon> polygons;
     std::wstring label;
     if (mode_ == Mode::Ground) {
@@ -1018,15 +1161,23 @@ void CollisionTools::Finish() {
             Status(L"Those points enclose no area.");
             return;
         }
+        if (nfsw)
+            for (auto& polygon : polygons) polygon.nfswSurface = worldGroundSurface_;
         label = L"Draw ground";
     } else {
         if (points_.size() < 2) { Status(L"A wall needs at least two points."); return; }
+        const bool barrier = mode_ == Mode::Barrier;
         collision::WallOptions options;
-        options.kind = mode_ == Mode::Barrier ? collision::WallKind::Barrier : collision::WallKind::Vertical;
+        // The World static collision stores walls with explicit heights only,
+        // so its "barrier" is a wall tall enough that nothing in play clears it.
+        options.kind = barrier && !nfsw ? collision::WallKind::Barrier : collision::WallKind::Vertical;
+        options.height = barrier && nfsw ? kNfswBarrierHeight : wallHeight_;
         options.surface = wallSurface_;
-        options.height = wallHeight_;
+        if (nfsw) options.bothSides = false;
         collision::AppendWall(points_, options, polygons);
-        label = mode_ == Mode::Barrier ? L"Draw barrier" : L"Draw wall";
+        if (nfsw)
+            for (auto& polygon : polygons) polygon.nfswSurface = worldWallSurface_;
+        label = barrier ? L"Draw barrier" : L"Draw wall";
     }
 
     const auto added = editor_.Add(polygons, label);
@@ -1055,6 +1206,7 @@ bool CollisionTools::BeginMove() {
         Status(L"Select collision polygons first (Ctrl+K shows them).");
         return false;
     }
+    if (host_.activateTool && !host_.activateTool()) return false;
     if (!editor_.BeginMove(refs)) return false;
 
     float sum = 0.0f;
@@ -1287,33 +1439,35 @@ bool CollisionTools::FillProperties(PropertiesPanel::View& view) {
         Format(L"%zu ground, %zu walls with height, %zu barriers", ground, vertical, barriers),
         L"Ground is driven on. A wall with height stops a car up to its top; a barrier has no top.");
 
-    // Surface: a drop-down of the game's table.
-    Row surface;
-    surface.group = L"Surface";
-    surface.name = L"Surface";
-    surface.value = surfaces.size() == 1 ? SurfaceLabel(*surfaces.begin()) : L"(several)";
-    surface.description = L"What the car feels and hears on it: grip, tyre sound, skid marks, sparks. "
-                          L"Changing it changes every selected polygon and its copies.";
-    surface.editable = true;
-    surface.field = kSurfaceField;
-    for (u8 s = 0; s < nfs::kSurfaceCount; ++s) surface.choices.push_back(SurfaceLabel(s));
-    if (surfaces.size() != 1) surface.choices.push_back(surface.value);
-    view.rows.push_back(std::move(surface));
+    if (!world->IsWorld()) {
+        // Surface: a drop-down of the game's table.
+        Row surface;
+        surface.group = L"Surface";
+        surface.name = L"Surface";
+        surface.value = surfaces.size() == 1 ? SurfaceLabel(*surfaces.begin()) : L"(several)";
+        surface.description = L"What the car feels and hears on it: grip, tyre sound, skid marks, sparks. "
+                              L"Changing it changes every selected polygon and its copies.";
+        surface.editable = true;
+        surface.field = kSurfaceField;
+        for (u8 s = 0; s < nfs::kSurfaceCount; ++s) surface.choices.push_back(SurfaceLabel(s));
+        if (surfaces.size() != 1) surface.choices.push_back(surface.value);
+        view.rows.push_back(std::move(surface));
 
-    Row race;
-    race.group = L"Surface";
-    race.name = L"Race barrier group";
-    race.value = groups.size() == 1 ? Widen(world->RaceBarrierGroupName(*groups.begin())) : L"(several)";
-    race.description = L"NONE: always there. Any other group exists only during the races that use it -- "
-                       L"in free roam the car goes straight through. Collision > Make Selection Always "
-                       L"Present sets NONE.";
-    race.editable = true;
-    race.field = kRaceField;
-    const auto& names = world->RaceBarrierGroups();
-    for (size_t g = 0; g < std::max<size_t>(names.size(), 1); ++g)
-        race.choices.push_back(Widen(world->RaceBarrierGroupName((u8)g)));
-    if (groups.size() != 1) race.choices.push_back(race.value);
-    view.rows.push_back(std::move(race));
+        Row race;
+        race.group = L"Surface";
+        race.name = L"Race barrier group";
+        race.value = groups.size() == 1 ? Widen(world->RaceBarrierGroupName(*groups.begin())) : L"(several)";
+        race.description = L"NONE: always there. Any other group exists only during the races that use it -- "
+                           L"in free roam the car goes straight through. Collision > Make Selection Always "
+                           L"Present sets NONE.";
+        race.editable = true;
+        race.field = kRaceField;
+        const auto& names = world->RaceBarrierGroups();
+        for (size_t g = 0; g < std::max<size_t>(names.size(), 1); ++g)
+            race.choices.push_back(Widen(world->RaceBarrierGroupName((u8)g)));
+        if (groups.size() != 1) race.choices.push_back(race.value);
+        view.rows.push_back(std::move(race));
+    }
 
     std::wstring sectionList;
     for (const std::string& name : sectionNames) sectionList += (sectionList.empty() ? L"" : L", ") + Widen(name);
@@ -1347,6 +1501,7 @@ bool CollisionTools::FillProperties(PropertiesPanel::View& view) {
 bool CollisionTools::ApplyProperties() {
     nfs::World* world = World();
     if (!world || Renderer().CollisionSelection().empty() || !host_.properties) return false;
+    if (world->IsWorld()) return true;
 
     std::wstring text;
     if (host_.properties->ReadText(kSurfaceField, text))

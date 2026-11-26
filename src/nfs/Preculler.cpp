@@ -138,6 +138,79 @@ bool Preculler::Parse(ByteSpan bunFile, bool underground1) {
     return !zones_.empty() && !visible_.empty();
 }
 
+bool Preculler::ParseNfsw(ByteSpan bunFile) {
+    zones_.clear();
+    visible_.clear();
+    records_.clear();
+
+    ChunkReader reader(bunFile, 0);
+    Chunk chunk;
+    Chunk container;
+    while (reader.Next(chunk)) {
+        if (chunk.id == kChunkVisibilityContainer) { container = chunk; break; }
+    }
+    if (container.id == 0) return false;
+
+    ChunkReader children = ChunkReader::Children(container);
+    while (children.Next(chunk)) {
+        if (chunk.id == 0x00034152u) {
+            const ByteSpan data = chunk.data;
+            size_t at = 0;
+            while (at + 11 <= data.size) {
+                const i16 section = data.read<i16>(at + 8);
+                const u32 points = data.data[at + 10];
+                const size_t length = 48 + (size_t)points * 8;
+                if (at + length > data.size) break;
+
+                if (section >= 0 && points >= 3) {
+                    Zone zone;
+                    zone.id = (u32)section;
+                    zone.boundsMin = { data.read<float>(at + 0x18),
+                                       data.read<float>(at + 0x1C), 0.0f };
+                    zone.boundsMax = { data.read<float>(at + 0x20),
+                                       data.read<float>(at + 0x24), 0.0f };
+                    if (zone.boundsMin.x > zone.boundsMax.x)
+                        std::swap(zone.boundsMin.x, zone.boundsMax.x);
+                    if (zone.boundsMin.y > zone.boundsMax.y)
+                        std::swap(zone.boundsMin.y, zone.boundsMax.y);
+                    for (u32 i = 0; i < points; ++i)
+                        zone.ring.push_back({ data.read<float>(at + 0x28 + i * 8),
+                                              data.read<float>(at + 0x2C + i * 8),
+                                              0.0f });
+                    zone.recordOffset = (u64)(data.data - bunFile.data) + at;
+                    zone.recordLength = (u32)length;
+                    zones_.push_back(std::move(zone));
+                }
+                at += length;
+            }
+        } else if (chunk.id == 0x00034153u) {
+            const ByteSpan data = chunk.raw;
+            size_t at = 0;
+            while (at + 20 <= data.size) {
+                const u32 id = data.read<u16>(at + 12);
+                const u32 capacity = data.read<u16>(at + 16);
+                const u32 count = data.read<u16>(at + 18);
+                const size_t length = 20 + (size_t)capacity * 2;
+                if (count > capacity || at + length > data.size) break;
+
+                std::vector<u32> sections;
+                sections.reserve(count);
+                for (u32 i = 0; i < count; ++i) {
+                    const u32 number = data.read<u16>(at + 20 + i * 2);
+                    if (number) sections.push_back(number);
+                }
+                visible_[id] = std::move(sections);
+                records_[id] = { (u64)(data.data - bunFile.data) + at, (u32)length };
+                at += length;
+            }
+        }
+    }
+
+    LOG_INFO("NFS World visibility: %zu zones, %zu visibility lists",
+             zones_.size(), visible_.size());
+    return !zones_.empty() && !visible_.empty();
+}
+
 bool Preculler::Contains(const Zone& zone, float x, float y) const {
     if (x < zone.boundsMin.x || x > zone.boundsMax.x) return false;
     if (y < zone.boundsMin.y || y > zone.boundsMax.y) return false;
@@ -240,6 +313,12 @@ int Preculler::ZoneAt(float x, float y) const {
     return best;
 }
 
+bool Preculler::ZoneContains(u32 zoneId, float x, float y) const {
+    for (const Zone& zone : zones_)
+        if (zone.id == zoneId) return Contains(zone, x, y);
+    return false;
+}
+
 const std::vector<u32>* Preculler::ListOf(u32 zoneId) const {
     const auto found = visible_.find(zoneId);
     return found == visible_.end() ? nullptr : &found->second;
@@ -253,8 +332,9 @@ bool Preculler::ListRecord(u32 zoneId, u64& fileOffset, u32& length) const {
     return true;
 }
 
-bool Preculler::VisibleAt(const Vec3& point, std::vector<u32>& sections) const {
+bool Preculler::VisibleAt(const Vec3& point, std::vector<u32>& sections, int* zoneId) const {
     sections.clear();
+    if (zoneId) *zoneId = -1;
     if (zones_.empty()) return false;
 
     const Zone* best = nullptr;
@@ -269,6 +349,7 @@ bool Preculler::VisibleAt(const Vec3& point, std::vector<u32>& sections) const {
     }
     if (!best) return false;
 
+    if (zoneId) *zoneId = (int)best->id;
     sections = visible_.find(best->id)->second;
     std::sort(sections.begin(), sections.end());
     sections.erase(std::unique(sections.begin(), sections.end()), sections.end());

@@ -7,16 +7,19 @@
 #include "io/ModelCopy.h"
 #include "io/SectionEdits.h"
 #include "io/SectionRebuild.h"
+#include "nfs/NfswFormats.h"
 #include "nfs/World.h"
 
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -177,12 +180,23 @@ bool ReadManifest(const std::wstring& path,
 }
 
 // The shapes an OBJ holds, in the order Blender wrote them.
+using ObjTriangle = std::array<u32, 3>;
+
+ObjTriangle NormaliseTriangle(ObjTriangle triangle) {
+    // Faces may change order or start at another corner in Blender's OBJ.
+    // Preserve the winding and compare the same ordered vertex indices.
+    return std::min({ triangle, ObjTriangle{ triangle[1], triangle[2], triangle[0] },
+                                 ObjTriangle{ triangle[2], triangle[0], triangle[1] } });
+}
+
 struct ObjObject {
     std::string       name;
     std::vector<Vec3> positions;
+    std::vector<ObjTriangle> triangles;
+    bool trianglesValid = true;
 };
 
-bool ReadObj(const std::wstring& path, std::vector<ObjObject>& objects) {
+bool ReadObj(const std::wstring& path, std::vector<ObjObject>& objects, bool readTriangles = false) {
     std::ifstream file(path);
     if (!file) return false;
 
@@ -190,11 +204,13 @@ bool ReadObj(const std::wstring& path, std::vector<ObjObject>& objects) {
     // is one object, called what the mesh reader calls it.
     ObjObject current;
     current.name = "object";
+    size_t vertexBase = 0;
     std::string line;
     while (std::getline(file, line)) {
         if (line.size() < 2) continue;
 
         if (line[0] == 'o' && line[1] == ' ') {
+            vertexBase += current.positions.size();
             if (!current.name.empty() && !current.positions.empty())
                 objects.push_back(std::move(current));
             current = ObjObject{};
@@ -205,6 +221,25 @@ bool ReadObj(const std::wstring& path, std::vector<ObjObject>& objects) {
             Vec3 position;
             if (stream >> position.x >> position.y >> position.z)
                 current.positions.push_back(position);
+            else if (readTriangles) return false;
+        } else if (readTriangles && line[0] == 'f' && line[1] == ' ') {
+            std::istringstream stream(line.substr(2));
+            ObjTriangle triangle{};
+            size_t corners = 0;
+            std::string corner;
+            while (stream >> corner && corner[0] != '#') {
+                char* end;
+                const i64 index = std::strtoll(corner.c_str(), &end, 10);
+                const i64 local = index < 0 ? (i64)current.positions.size() + index : index - 1 - (i64)vertexBase;
+                if (corners >= 3 || !index || (*end && *end != '/') ||
+                    local < 0 || (u64)local >= current.positions.size()) {
+                    current.trianglesValid = false;
+                    break;
+                }
+                triangle[corners++] = (u32)local;
+            }
+            if (corners == 3 && current.trianglesValid) current.triangles.push_back(NormaliseTriangle(triangle));
+            else current.trianglesValid = false;
         }
     }
     if (!current.name.empty() && !current.positions.empty()) objects.push_back(std::move(current));
@@ -1204,11 +1239,111 @@ bool RebuildForNewMesh(const nfs::World& world, const std::wstring& objPath,
 
 } // namespace
 
+namespace {
+
+bool PlanWorldMeshImport(const nfs::World& world, std::vector<ObjObject>& objects,
+                         const std::unordered_map<std::string, ManifestEntry>& entries, ImportPlan& plan) {
+    std::string region;
+    const std::string manifest = ReadWholeFile(plan.manifestPath);
+    if (!FindString(manifest, 0, manifest.size(), "region", region) ||
+        std::wstring(region.begin(), region.end()) != world.Region()) {
+        plan.report = L"The mesh export belongs to a different region.";
+        return false;
+    }
+
+    std::set<u32> seen;
+    std::vector<nfs::NfswMeshUpdate> updates;
+    for (auto& object : objects) {
+        const auto entry = entries.find(object.name);
+        const std::wstring name(object.name.begin(), object.name.end());
+        const auto* model = entry == entries.end() ? nullptr : world.FindModel(entry->second.hash);
+        if (!model || model->name != entry->second.model || !seen.insert(model->hash).second) {
+            plan.report = name + L": keep one copy of each exported object and its original name.";
+            return false;
+        }
+        // The OBJ importer keeps original vertex order, but omits
+        // vertices unreferenced by its faces. Preserve those in the BUN.
+        std::vector<bool> used(model->vertices.size());
+        for (u16 vertex : model->indices) used[vertex] = true;
+        const bool compact = object.positions.size() != model->vertices.size();
+        std::vector<u32> vertexMap;
+        std::vector<u32> objIndex(model->vertices.size());
+        for (size_t i = 0; i < used.size(); ++i) {
+            if (compact && !used[i]) continue;
+            objIndex[i] = (u32)vertexMap.size();
+            vertexMap.push_back((u32)i);
+        }
+        if (!object.trianglesValid || object.positions.size() != vertexMap.size()) {
+            plan.report = name + L": World mesh writeback requires the original vertices and faces.";
+            return false;
+        }
+
+        std::vector<ObjTriangle> expected;
+        expected.reserve(model->TriangleCount());
+        for (size_t i = 0; i + 2 < model->indices.size(); i += 3)
+            expected.push_back(NormaliseTriangle({ objIndex[model->indices[i]], objIndex[model->indices[i + 1]],
+                                                   objIndex[model->indices[i + 2]] }));
+        // Blender validates away repeated or degenerate OBJ faces. They stay
+        // in the game's original index buffer and cannot change the vertex map.
+        const auto uniqueFaces = [](std::vector<ObjTriangle>& faces) {
+            faces.erase(std::remove_if(faces.begin(), faces.end(), [](const auto& face) {
+                return face[0] == face[1] || face[1] == face[2] || face[0] == face[2];
+            }), faces.end());
+            std::sort(faces.begin(), faces.end());
+            faces.erase(std::unique(faces.begin(), faces.end()), faces.end());
+        };
+        uniqueFaces(expected);
+        uniqueFaces(object.triangles);
+        if (expected != object.triangles) {
+            plan.report = name + L": vertex order, winding or face connectivity changed. Export the original mesh again to edit it.";
+            return false;
+        }
+
+        const Mat4& transform = entry->second.transform;
+        const Vec3 x{ transform.m[0][0], transform.m[0][1], transform.m[0][2] };
+        const Vec3 y{ transform.m[1][0], transform.m[1][1], transform.m[1][2] };
+        const Vec3 z{ transform.m[2][0], transform.m[2][1], transform.m[2][2] };
+        const float determinant = Dot(x, Cross(y, z));
+        if (!std::isfinite(determinant) || std::fabs(determinant) < 1e-12f) {
+            plan.report = name + L": the exported placement transform could not be inverted.";
+            return false;
+        }
+        const Mat4 toLocal = InverseAffine(transform);
+        std::vector<Vec3> positions;
+        positions.reserve(model->vertices.size());
+        for (const auto& vertex : model->vertices) positions.push_back(vertex.position);
+        size_t moved = 0;
+        for (size_t i = 0; i < object.positions.size(); ++i) {
+            const Vec3 point = toLocal.TransformPoint(FromBlender(object.positions[i]) + plan.origin);
+            if (!std::isfinite(Length(point))) {
+                plan.report = name + L": there is an invalid vertex position in the OBJ.";
+                return false;
+            }
+            Vec3& previous = positions[vertexMap[i]];
+            if (Length(point - previous) <= 0.001f) continue;
+            previous = point;
+            ++moved;
+        }
+        if (!moved) continue;
+        plan.worldVerticesChanged += moved;
+        updates.push_back({ model->name, model->hash, std::move(positions), model->indices });
+    }
+    plan.worldMeshesChanged = updates.size();
+    return PlanNfswMeshOverlays(world, updates, plan.worldMeshOverlays, plan.report);
+}
+
+} // namespace
+
 bool PlanImport(const nfs::World& world, const std::wstring& objPath, ImportPlan& plan,
                 const Vec3* newOrigin) {
     plan.objPath = objPath;
     std::vector<ObjObject> objects;
-    if (!ReadObj(objPath, objects)) {
+    plan.worldMeshImport = world.IsWorld();
+    if (plan.worldMeshImport && newOrigin) {
+        plan.report = L"World mesh writeback requires an existing exported mesh.";
+        return false;
+    }
+    if (!ReadObj(objPath, objects, plan.worldMeshImport)) {
         plan.report = L"That OBJ holds no named objects.";
         LOG_ERROR("import: the OBJ has no objects");
         return false;
@@ -1233,6 +1368,7 @@ bool PlanImport(const nfs::World& world, const std::wstring& objPath, ImportPlan
     }
 
     plan.origin = origin;
+    if (plan.worldMeshImport) return PlanWorldMeshImport(world, objects, entries, plan);
 
     std::wostringstream report;
     std::wostringstream rebuilds;
@@ -1533,9 +1669,14 @@ bool PlanImport(const nfs::World& world, const std::wstring& objPath, ImportPlan
 
 bool ApplyImport(const ImportPlan& plan, const std::wstring& gameFolder,
                  const std::wstring& region, ImportSummary& summary) {
-    if (plan.Empty()) return false;
-
     summary.modelsFolder = gameFolder + L"\\models";
+    if (plan.worldMeshImport) {
+        if (!WriteNfswMeshOverlays(plan.worldMeshOverlays, summary.modelsFolder, summary.error)) return false;
+        summary.objectsWritten = plan.worldMeshesChanged;
+        summary.verticesWritten = plan.worldVerticesChanged;
+        return true;
+    }
+    if (plan.Empty()) return false;
 
     for (const ImportPlan::Mesh& mesh : plan.meshes) {
         MeshOverlay overlay;

@@ -101,6 +101,7 @@ public:
     virtual bool ToolActive() const { return false; }
     virtual void CloseTools() {}
     virtual bool ToolDigit(int digit) { (void)digit; return false; }
+    virtual bool ToolShortcut(WPARAM key, bool repeat) { (void)key; (void)repeat; return false; }
     // G and R on a point with a heading (Viewport::SetPointEditor).
     virtual bool GetPoint(Vec3& position, float& heading) { (void)position; (void)heading; return false; }
     virtual bool SetPoint(const Vec3& position, float heading, bool commit) {

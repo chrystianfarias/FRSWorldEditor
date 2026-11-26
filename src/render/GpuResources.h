@@ -61,7 +61,7 @@ class GpuSection {
 public:
     ~GpuSection();
 
-    bool Upload(IDirect3DDevice9* device, const nfs::LoadedSection& section);
+    bool Upload(IDirect3DDevice9* device, const nfs::LoadedSection& section, bool nfsw = false);
     void Release();
 
     IDirect3DVertexBuffer9* VertexBuffer() const { return vertexBuffer_; }

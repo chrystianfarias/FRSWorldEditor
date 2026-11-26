@@ -16,6 +16,8 @@
 #include "ui/ZoneTools.h"
 #include "ui/OnlineLibrary.h"
 #include "io/PlacementWrite.h"
+#include "io/NfswPlacementWrite.h"
+#include "io/NfswAttributeOverlay.h"
 #include "io/SectionEdits.h"
 #include "ui/PlacementDialogs.h"
 #include "nfs/FreeRoam.h"
@@ -65,6 +67,8 @@ constexpr UINT kRunSetupMessage = WM_APP + 1;
 constexpr DWORD kFastBootRestoreMs = 15000;
 
 constexpr int kComboHeight  = 24;
+constexpr int kSmackableHashField = 8;
+constexpr int kSmackableBoxField = 9;
 // Also the width of the gaps that resize the panels.
 constexpr int kPanelPadding = 6;
 constexpr int kMinSideWidth  = 170;
@@ -258,6 +262,12 @@ void MainWindow::QueueThumbnailWarmUp() {
     thumbsToWarm_.clear();
     thumbsWarmed_ = 0;
     if (!world_) return;
+    // NFS World ships 28k models; warming every catalogue picture would keep
+    // the editor busy for minutes. They are drawn on demand instead.
+    if (world_->IsWorld()) {
+        LOG_INFO("thumbnails: NFS World, warming skipped (%zu models)", world_->AllModels().size());
+        return;
+    }
     // What the catalogue can show: no backdrop, and no ground, which it keeps
     // off its shelves -- L4RA has 4,372 pieces of it.
     for (const nfs::SolidObject* model : world_->AllModels()) {
@@ -833,6 +843,7 @@ void MainWindow::OnCreate() {
         host.world = [this] { return world_.get(); };
         host.status = [this](const std::wstring& text) { SetStatusText(2, text); };
         host.menuChecks = [this] { UpdateMenuChecks(); };
+        host.activateTool = [this] { return ActivateViewportTool(collisionTools_); };
         auto tools = std::make_unique<CollisionTools>(std::move(host));
         collisionTools_ = tools.get();
         extensions_.push_back(std::move(tools));
@@ -1125,6 +1136,27 @@ void MainWindow::StorePanelSizes() const {
 // Commands
 // ---------------------------------------------------------------------------
 
+bool MainWindow::HandleToolShortcut(const MSG& message) {
+    if (message.message != WM_KEYDOWN || message.hwnd != viewport_.Handle() ||
+        viewport_.Looking() || viewport_.Transforming() || viewport_.GizmoDragging() ||
+        ::GetKeyState(VK_CONTROL) < 0 || ::GetKeyState(VK_MENU) < 0) return false;
+    return std::any_of(extensions_.begin(), extensions_.end(), [&](const auto& extension) {
+        return extension->ToolActive() &&
+               extension->ToolShortcut(message.wParam, (message.lParam & (1 << 30)) != 0);
+    });
+}
+
+bool MainWindow::ActivateViewportTool(const EditorExtension* owner) {
+    if ((meshTools_ && meshTools_->Active()) || (zoneTools_ && zoneTools_->Editing())) {
+        SetStatusText(2, L"Finish the current Edit Mode session (Tab) before switching tools.");
+        return false;
+    }
+    viewport_.CancelDrag();
+    for (auto& extension : extensions_)
+        if (extension.get() != owner && extension->ToolActive()) extension->CloseTools();
+    return true;
+}
+
 void MainWindow::OnCommand(int id, int notification, HWND control) {
     if (properties_.OnCommand(id)) return;
     if (control && control == sideSearch_ && notification == EN_CHANGE && sideTab_ == 0 && !shell_) {
@@ -1141,6 +1173,9 @@ void MainWindow::OnCommand(int id, int notification, HWND control) {
         }
         return;
     }
+
+    if (id == MeshTools::kEditCommand && !(meshTools_ && meshTools_->Active()) &&
+        !(zoneTools_ && zoneTools_->Editing())) ActivateViewportTool(meshTools_);
 
     // Move, rotate and scale are tools like the extensions' own: choosing one
     // turns those off. Their keys (1, 2, 3) go to a tool that is on first.
@@ -1232,7 +1267,16 @@ void MainWindow::OnCommand(int id, int notification, HWND control) {
         case ID_WORLD_SAVE:      SaveWorld(); break;
         case ID_WORLD_SAVE_AS:   SaveWorldAs(); break;
         case ID_WORLD_PUBLISH:   PublishWorld(); break;
+        case ID_FILE_WORLD_ATTRIBUTES: ImportWorldAttributes(); break;
         case ID_WORLD_LOAD_ALL:  LoadAllSections(); break;
+        case ID_WORLD_HOLIDAY_NORMAL:      SetHoliday(nfs::Holiday::Normal); break;
+        case ID_WORLD_HOLIDAY_HALLOWEEN:   SetHoliday(nfs::Holiday::Halloween); break;
+        case ID_WORLD_HOLIDAY_OKTOBERFEST: SetHoliday(nfs::Holiday::Oktoberfest); break;
+        case ID_WORLD_HOLIDAY_CHRISTMAS:   SetHoliday(nfs::Holiday::Christmas); break;
+        case ID_WORLD_HOLIDAY_VALENTINES:  SetHoliday(nfs::Holiday::Valentines); break;
+        case ID_WORLD_HOLIDAY_NEWYEARS:    SetHoliday(nfs::Holiday::NewYears); break;
+        case ID_WORLD_HOLIDAY_TOPGEAR:     SetHoliday(nfs::Holiday::TopGear); break;
+        case ID_WORLD_HOLIDAY_ALL:         SetHoliday(nfs::Holiday::All); break;
         case ID_WORLD_FRAME:
             if (world_) viewport_.FrameBounds(world_->TrackBounds());
             else        viewport_.FrameWorld();
@@ -1304,8 +1348,32 @@ void MainWindow::OnCommand(int id, int notification, HWND control) {
             renderer.SetStreamingEnabled(!renderer.StreamingEnabled());
             UpdateMenuChecks();
             SetStatusText(2, renderer.StreamingEnabled()
-                                 ? L"Streaming sections around the camera"
-                                 : L"Drawing every section at once");
+                                 ? L"Stream Visibility: path-zone prediction and game section lists"
+                                 : L"All sections: diagnostic view, preplaced/distant copies may overlap");
+            break;
+        }
+
+        case ID_VIEW_PROXIES: {
+            WorldRenderer& renderer = viewport_.GetRenderer();
+            renderer.SetProxiesVisible(!renderer.ProxiesVisible());
+            UpdateMenuChecks();
+            SetStatusText(2, renderer.ProxiesVisible()
+                                 ? L"Engine proxies shown (diagnostic: SHD_/RFL_/CU_SHBLOCK)"
+                                 : L"Engine proxies hidden (game view)");
+            break;
+        }
+
+        case ID_VIEW_GAME_STANDARD: {
+            WorldRenderer& renderer = viewport_.GetRenderer();
+            renderer.ApplyGameStandardView();
+            if (world_) world_->SetHoliday(nfs::Holiday::Normal);
+            UpdateMenuChecks();
+            SetStatusText(2, L"Game standard view: zone visibility, backdrops, scenery and sky on; "
+                             L"editor-only hides off");
+            LOG_INFO("game standard view: zone lists %s, backdrops on, scenery on, library off, "
+                     "alternates off, collision off, hide-background/LOD off, holiday Normal; "
+                     "structural proxy/backdrop/block-out skips remain",
+                     renderer.StreamingEnabled() ? "on" : "off");
             break;
         }
 
@@ -1325,6 +1393,15 @@ void MainWindow::OnCommand(int id, int notification, HWND control) {
             viewport_.GetRenderer().SetSceneryVisible(
                 !viewport_.GetRenderer().SceneryVisible());
             UpdateMenuChecks();
+            break;
+
+        case ID_VIEW_RACE_PROPS:
+            viewport_.GetRenderer().SetRacePropsVisible(
+                !viewport_.GetRenderer().RacePropsVisible());
+            UpdateMenuChecks();
+            SetStatusText(2, viewport_.GetRenderer().RacePropsVisible()
+                                 ? L"Race barriers shown (editor visibility only)"
+                                 : L"Race barriers hidden");
             break;
 
         case ID_FILE_EDITS:        ShowRegionEditList(); break;
@@ -1354,7 +1431,7 @@ void MainWindow::OnCommand(int id, int notification, HWND control) {
         case ID_OBJECT_SNAP:       SnapSelectedPlacement(); break;
         case ID_OBJECT_COPY:       CopySelection(); break;
         case ID_OBJECT_PASTE:      PasteClipboard(); break;
-        case ID_OBJECT_SAVE:       SavePlacements(); break;
+        case ID_OBJECT_SAVE:       SavePlacements(true); break;
         case ID_OBJECT_GRAB:
             viewport_.BeginTransform(Viewport::TransformMode::Move);
             break;
@@ -1480,17 +1557,24 @@ void MainWindow::ShowAbout() {
 // an edit are written for Underground 2. True (and says so) when the open
 // region is one.
 bool MainWindow::RefuseReadOnlyWorld() {
-    if (!world_ || !world_->IsUnderground1()) return false;
-    ::MessageBoxW(window_, L"Need for Speed Underground regions are read-only for now: the editor can show and export them, but nothing it writes would reach the game.", kWindowTitle, MB_ICONINFORMATION | MB_OK);
+    if (!world_ || (!world_->IsUnderground1() && !world_->IsWorld())) return false;
+    ::MessageBoxW(window_,
+                  world_->IsWorld()
+                      ? L"This command is not available for Need for Speed: World yet. Moving scenery and saving section overlays are supported."
+                      : L"Need for Speed Underground regions are read-only for now: the editor can show and export them, but nothing it writes would reach the game.",
+                  kWindowTitle, MB_ICONINFORMATION | MB_OK);
     return true;
 }
 
 void MainWindow::UpdateTitle() {
     std::wstring title = kWindowTitle;
+    if (world_ && world_->IsWorld()) title = L"FRS World Editor - Need for Speed: World";
     if (world_) {
         title += L" - " + world_->Region();
         if (world_->IsUnderground1())
             title += L" (Underground, track " + std::to_wstring(world_->TrackNumber()) + L", read-only)";
+        else if (world_->IsWorld())
+            title += L" (section overlays)";
     }
     if (!gameFolder_.empty()) title += L" [" + worldName_ + L"]";
     ::SetWindowTextW(window_, title.c_str());
@@ -1781,11 +1865,11 @@ void MainWindow::SaveWorld() {
         SetStatusText(2, L"No region open: nothing to save.");
         return;
     }
-    if (RefuseReadOnlyWorld()) return;
+    if (!world_->IsWorld() && RefuseReadOnlyWorld()) return;
     // Extensions write what they have not yet; placements wait for this, and
     // reopen the region once written.
     for (auto& extension : extensions_) extension->Save();
-    if (!SavePlacements()) return;
+    if (!SavePlacements(true)) return;
     // Then the world file: the first time, wherever the person wants it.
     if (worldPath_.empty()) { SaveWorldAs(); return; }
     if (WriteWorldFile(worldPath_)) SetStatusText(2, Format(L"World \"%s\" saved", worldName_.c_str()));
@@ -2034,6 +2118,37 @@ void MainWindow::UpdateGameView() {
     }
 }
 
+void MainWindow::ImportWorldAttributes() {
+    if (!world_ || !world_->IsWorld() || modelsFolder_.empty()) return;
+
+    wchar_t path[MAX_PATH]{};
+    const std::wstring global = gameFolder_ + L"\\GLOBAL";
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = window_;
+    dialog.lpstrTitle = L"Import an NFS World attribute pack";
+    dialog.lpstrFilter = L"Attribute packs (*.bin)\0*.bin\0All files (*.*)\0*.*\0";
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = MAX_PATH;
+    dialog.lpstrInitialDir = global.c_str();
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!::GetOpenFileNameW(&dialog)) return;
+
+    const std::wstring target = modelsFolder_ + L"\\" + nfs::kNfswAttributesOverlayPath;
+    if (::GetFileAttributesW(target.c_str()) != INVALID_FILE_ATTRIBUTES &&
+        ::MessageBoxW(window_, L"Replace the current external World attribute pack?",
+                      kWindowTitle, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+
+    std::wstring error;
+    if (!InstallNfswAttributeOverlay(path, modelsFolder_, error)) {
+        ::MessageBoxW(window_, error.c_str(), kWindowTitle, MB_OK | MB_ICONWARNING);
+        return;
+    }
+    world_->ReloadSmackableAttributes();
+    UpdateProperties();
+    SetStatusText(2, L"External World attributes installed. The game loads them on its next launch.");
+}
+
 void MainWindow::ShowEditedMeshes() {
     if (modelsFolder_.empty()) {
         ::MessageBoxW(window_, L"Set the game folder first.", kWindowTitle,
@@ -2150,7 +2265,8 @@ void MainWindow::ImportEditedObjectsImpl() {
 
 void MainWindow::ImportObj(const std::wstring& path, bool quick, const Vec3* newOrigin) {
     if (!world_) return;
-    if (RefuseReadOnlyWorld()) return;
+    if (world_->IsUnderground1() && RefuseReadOnlyWorld()) return;
+    if (world_->IsWorld() && !ConfirmUnsavedPlacements()) return;
 
     // Everything that needs the region is read first, because the region has to
     // be closed before the file can be written: the editor keeps the stream in a
@@ -2159,6 +2275,32 @@ void MainWindow::ImportObj(const std::wstring& path, bool quick, const Vec3* new
     // nothing.
     ImportPlan plan;
     const bool planned = PlanImport(*world_, path, plan, newOrigin);
+    if (plan.worldMeshImport) {
+        if (!planned) {
+            LOG_WARN("World Blender import: %S", plan.report.c_str());
+            ::MessageBoxW(window_, plan.report.c_str(), kWindowTitle, MB_ICONWARNING | MB_OK);
+            return;
+        }
+        if (plan.worldMeshOverlays.empty()) {
+            SetStatusText(2, L"Blender: the World mesh positions match the saved version.");
+            return;
+        }
+        const std::wstring region = world_->Region();
+        ImportSummary summary;
+        if (!ApplyImport(plan, gameFolder_, region, summary)) {
+            LOG_WARN("World mesh overlay: %S", summary.error.c_str());
+            ::MessageBoxW(window_, summary.error.c_str(), kWindowTitle, MB_ICONWARNING | MB_OK);
+            return;
+        }
+        const Camera camera = viewport_.GetCamera();
+        OpenRegion(region);
+        if (!world_) return;
+        viewport_.GetCamera().SetPosition(camera.Position());
+        viewport_.GetCamera().SetYawPitch(camera.Yaw(), camera.Pitch());
+        SetStatusText(2, Format(L"Blender: saved %zu World meshes in %zu external sections.",
+                                summary.objectsWritten, plan.worldMeshOverlays.size()));
+        return;
+    }
 
     std::wstring message =
         Format(L"Read %zu objects from the OBJ.\n\n", plan.objectsRead);
@@ -2285,9 +2427,12 @@ void MainWindow::EditInBlender() {
         return;
     }
 
-    SetStatusText(2, Format(L"Editing %zu meshes in Blender -- save there (Ctrl+S) to load "
-                            L"them here. New objects added there are placed too.",
-                            summary.objects));
+    blenderWorldProject_ = world_->IsWorld() ? modelsFolder_ + L"|" + worldName_ : std::wstring{};
+    SetStatusText(2, world_->IsWorld()
+        ? Format(L"Editing %zu World meshes in Blender. Move vertices, then save (Ctrl+S) to write the external sections.",
+                 summary.objects)
+        : Format(L"Editing %zu meshes in Blender -- save there (Ctrl+S) to load them here. "
+                 L"New objects added there are placed too.", summary.objects));
 }
 
 void MainWindow::EditCollisionInBlender() {
@@ -2333,11 +2478,16 @@ void MainWindow::EditCollisionInBlender() {
         return;
     }
     blenderCollision_ = true;
+    blenderWorldProject_.clear();
     SetStatusText(2, Format(L"Editing %zu collision polygons in Blender -- save there (Ctrl+S) to load them here",
                             summary.polygons));
 }
 
 void MainWindow::NewObjectInBlender() {
+    if (world_ && world_->IsWorld()) {
+        SetStatusText(2, L"World Blender writeback needs an existing mesh. Select one and use Edit in Blender.");
+        return;
+    }
     if (!world_ || tracksFolder_.empty()) {
         ::MessageBoxW(window_, L"Open a region first.", kWindowTitle,
                       MB_ICONINFORMATION | MB_OK);
@@ -2390,6 +2540,7 @@ void MainWindow::NewObjectInBlender() {
         ::MessageBoxW(window_, error.c_str(), kWindowTitle, MB_ICONWARNING | MB_OK);
         return;
     }
+    blenderWorldProject_.clear();
     SetStatusText(2, Format(L"New object in Blender: its origin is the view centre (%.0f, %.0f, "
                             L"%.0f). Save there (Ctrl+S) to place what you model.",
                             point.x, point.y, point.z));
@@ -2467,6 +2618,11 @@ void MainWindow::PollBlender() {
     // Checked before asking whether Blender is still open, so a save made just
     // before closing it is not lost.
     if (blender_.PollSaved()) {
+        if (!world_ || (!blenderWorldProject_.empty() &&
+                        (!world_->IsWorld() || blenderWorldProject_ != modelsFolder_ + L"|" + worldName_))) {
+            SetStatusText(2, L"Blender: reopen the original project and send the saved mesh again.");
+            return;
+        }
         LOG_INFO("quick edit: Blender saved, importing %S", blender_.ObjPath().c_str());
         try {
             if (blenderCollision_) ImportEditedCollision(blender_.ObjPath(), true);
@@ -2484,6 +2640,7 @@ void MainWindow::PollBlender() {
     if (!blender_.Running()) {
         blender_.Stop();
         blenderCollision_ = false;
+        blenderWorldProject_.clear();
         blenderBases_.clear();
         SetStatusText(2, L"Blender closed; the quick edit is finished");
     }
@@ -2763,6 +2920,7 @@ void MainWindow::CloseRegion() {
     UpdateTitle();
     SetStatusText(1, L"");
     SetStatusText(2, L"");
+    UpdateMenuChecks();
 }
 
 void MainWindow::LoadAllSections() {
@@ -2783,7 +2941,12 @@ void MainWindow::LoadAllSections() {
     viewport_.SetWorld(world_.get());
     const DWORD uploadMs = ::GetTickCount() - uploadStart;
 
+    // Start with the whole region visible for editing: streaming zones,
+    // backdrop and backface culling are off until the user asks for the game
+    // look (View > Game Standard View).
+
     PopulateSectionTree();
+    UpdateMenuChecks();
     thumbnails_.SetRegion(world_->Region());
     catalog_.SetWorld(world_.get());
     QueueThumbnailWarmUp();
@@ -2822,6 +2985,7 @@ void MainWindow::LoadAllSections() {
     // What the extensions list in the Library is known only now.
     catalog_.Refresh();
     PopulateSectionTree();
+    UpdateMenuChecks();
 
     LOG_INFO("region loaded: parse %lu ms, upload %lu ms", parseMs, uploadMs);
     // FRS_SAVE_SELFTEST=1, and only with FRS_GAME_FOLDER (a scratch game
@@ -2836,6 +3000,23 @@ void MainWindow::LoadAllSections() {
         LOG_INFO("save selftest: %zu sections to save, %s", pending, saved ? "saved" : "FAILED");
         ::PostMessageW(window_, WM_CLOSE, 0, 0);
     }
+}
+
+void MainWindow::SetHoliday(nfs::Holiday holiday) {
+    if (!world_) return;
+    if (!world_->IsWorld()) {
+        SetStatusText(2, L"Holiday scenery is NFS World only");
+        return;
+    }
+    world_->SetHoliday(holiday);
+    static const wchar_t* names[] = {
+        L"Normal", L"Halloween", L"Oktoberfest", L"Christmas",
+        L"Valentines", L"New Years", L"Top Gear", L"All",
+    };
+    SetStatusText(2, std::wstring(L"Holiday: ") + names[(int)holiday]);
+    LOG_INFO("holiday scenery: %d (%zu hidden instances)", (int)holiday,
+             world_->HolidayHiddenCount());
+    UpdateMenuChecks();
 }
 
 void MainWindow::PopulateSectionTree() {
@@ -2982,15 +3163,42 @@ void MainWindow::PopulateSectionTree() {
 
     // The sections last and closed: a place to jump to, not to read.
     {
+        // NFS World has 5,785 of them: the list is grouped by the first
+        // letter of the section tag (A..G positioned, U..Y library).
         HTREEITEM branch = insert(TVI_ROOT, Format(L"Sections (%zu)", loaded.size()), (intptr_t)-1);
         size_t shown = 0;
-        for (size_t i = 0; i < loaded.size(); ++i) {
-            const nfs::LoadedSection& section = *loaded[i];
-            const std::wstring text = Format(L"%s  -  %zu obj, %zu tris", Widen(section.info->name).c_str(),
-                                             section.ObjectCount(), section.TriangleCount());
-            if (!matches(text)) continue;
-            insert(branch, text, (intptr_t)i);
-            ++shown;
+        if (world_->IsWorld()) {
+            std::map<wchar_t, std::vector<size_t>> groups;
+            for (size_t i = 0; i < loaded.size(); ++i) {
+                const nfs::LoadedSection& section = *loaded[i];
+                if (!section.info || section.info->name.empty()) continue;
+                const std::wstring text = Format(L"%s  -  %zu obj, %zu tris",
+                                                 Widen(section.info->name).c_str(),
+                                                 section.ObjectCount(), section.TriangleCount());
+                if (!matches(text)) continue;
+                groups[(wchar_t)section.info->name[0]].push_back(i);
+            }
+            for (const auto& [letter, indexes] : groups) {
+                HTREEITEM group = insert(branch, Format(L"%c  (%zu)", letter, indexes.size()),
+                                         kExtensionNoItem);
+                for (size_t i : indexes) {
+                    const nfs::LoadedSection& section = *loaded[i];
+                    const std::wstring text = Format(L"%s  -  %zu obj, %zu tris",
+                                                     Widen(section.info->name).c_str(),
+                                                     section.ObjectCount(), section.TriangleCount());
+                    insert(group, text, (intptr_t)i);
+                    ++shown;
+                }
+            }
+        } else {
+            for (size_t i = 0; i < loaded.size(); ++i) {
+                const nfs::LoadedSection& section = *loaded[i];
+                const std::wstring text = Format(L"%s  -  %zu obj, %zu tris", Widen(section.info->name).c_str(),
+                                                 section.ObjectCount(), section.TriangleCount());
+                if (!matches(text)) continue;
+                insert(branch, text, (intptr_t)i);
+                ++shown;
+            }
         }
         finish(branch, shown, false);
     }
@@ -3210,6 +3418,8 @@ void MainWindow::SetRenderMode(RenderMode mode) {
 
 void MainWindow::UpdateMenuChecks() {
     if (!menu_) return;
+    for (const int command : { ID_FILE_WORLD_ATTRIBUTES })
+        ::EnableMenuItem(menu_, command, MF_BYCOMMAND | (world_ && world_->IsWorld() ? MF_ENABLED : MF_GRAYED));
 
     const GizmoMode gizmo = viewport_.GetGizmoMode();
     const int gizmoId = gizmo == GizmoMode::Move ? ID_GIZMO_MOVE
@@ -3251,6 +3461,12 @@ void MainWindow::UpdateMenuChecks() {
     ::CheckMenuItem(menu_, ID_VIEW_SCENERY,
                     MF_BYCOMMAND | (viewport_.GetRenderer().SceneryVisible() ? MF_CHECKED
                                                                              : MF_UNCHECKED));
+    ::CheckMenuItem(menu_, ID_VIEW_RACE_PROPS,
+                    MF_BYCOMMAND | (viewport_.GetRenderer().RacePropsVisible() ? MF_CHECKED
+                                                                               : MF_UNCHECKED));
+    ::CheckMenuItem(menu_, ID_VIEW_PROXIES,
+                    MF_BYCOMMAND | (viewport_.GetRenderer().ProxiesVisible() ? MF_CHECKED
+                                                                             : MF_UNCHECKED));
     ::CheckMenuItem(menu_, ID_VIEW_BACKDROP,
                     MF_BYCOMMAND | (viewport_.GetRenderer().BackdropVisible() ? MF_CHECKED
                                                                               : MF_UNCHECKED));
@@ -3279,6 +3495,25 @@ void MainWindow::UpdateMenuChecks() {
                     MF_BYCOMMAND | (viewport_.GetRenderer().DistantLodHidden() ? MF_CHECKED : MF_UNCHECKED));
     ::CheckMenuItem(menu_, kViewEditedOnlyCommand,
                     MF_BYCOMMAND | (viewport_.GetRenderer().EditedOnly() ? MF_CHECKED : MF_UNCHECKED));
+
+    // The holiday submenu, Game Standard View and the proxy diagnostic only
+    // exist in NFS World; keep the menus honest in the other games instead of
+    // offering switches that cannot do anything.
+    const bool worldAvailable = world_ && world_->IsWorld();
+    for (int id = ID_WORLD_HOLIDAY_NORMAL; id <= ID_WORLD_HOLIDAY_ALL; ++id)
+        ::EnableMenuItem(menu_, id, MF_BYCOMMAND | (worldAvailable ? MF_ENABLED : MF_GRAYED));
+    ::EnableMenuItem(menu_, ID_VIEW_GAME_STANDARD,
+                     MF_BYCOMMAND | (worldAvailable ? MF_ENABLED : MF_GRAYED));
+    ::EnableMenuItem(menu_, ID_VIEW_PROXIES,
+                     MF_BYCOMMAND | (worldAvailable ? MF_ENABLED : MF_GRAYED));
+    if (worldAvailable) {
+        const int holidayId = ID_WORLD_HOLIDAY_NORMAL + (int)world_->CurrentHoliday();
+        ::CheckMenuRadioItem(menu_, ID_WORLD_HOLIDAY_NORMAL, ID_WORLD_HOLIDAY_ALL,
+                             holidayId, MF_BYCOMMAND);
+    } else {
+        for (int id = ID_WORLD_HOLIDAY_NORMAL; id <= ID_WORLD_HOLIDAY_ALL; ++id)
+            ::CheckMenuItem(menu_, id, MF_BYCOMMAND | MF_UNCHECKED);
+    }
     for (auto& extension : extensions_) extension->UpdateMenuChecks(menu_);
 }
 
@@ -3741,7 +3976,7 @@ void MainWindow::PlaceModel(u32 hash, bool copy, size_t target, const Vec3& poin
         if (done) break;
     }
 
-    if (copy && std::find(section->importedModels.begin(), section->importedModels.end(), hash) ==
+    if (!world_->IsWorld() && copy && std::find(section->importedModels.begin(), section->importedModels.end(), hash) ==
                     section->importedModels.end())
         section->importedModels.push_back(hash);
     section->placements.push_back({ section->info->number, placed });
@@ -3860,7 +4095,19 @@ void MainWindow::CopySelection() {
             clipboard_.push_back(section.placements[(size_t)picked.placement].instance);
             continue;
         }
-        if (!picked.IsNative() || (size_t)picked.native >= section.scenery.instances.size()) continue;
+        if (!picked.IsNative()) {
+            if (world_->IsWorld() && picked.object) {
+                nfs::PlacedInstance road;
+                road.modelHash = picked.object->hash;
+                road.modelName = picked.object->name;
+                road.modelBounds = picked.object->bounds;
+                road.triangles = picked.object->TriangleCount();
+                road.transform = picked.transform;
+                if (world_->RoadPlacementAnchor(road)) clipboard_.push_back(std::move(road));
+            }
+            continue;
+        }
+        if ((size_t)picked.native >= section.scenery.instances.size()) continue;
 
         // One of the map's own: its record, as a placement to be.
         const nfs::Scenery& scenery = section.scenery;
@@ -3869,6 +4116,7 @@ void MainWindow::CopySelection() {
         nfs::PlacedInstance placed;
         placed.modelHash = scenery.ModelHash(instance);
         placed.modelName = scenery.infos[instance.infoIndex].name;
+        placed.smackable = world_->SmackablePlacement(section, (size_t)picked.native);
         placed.transform = instance.transform;
         placed.flags = (u16)instance.flags;
         placed.infoTemplate = scenery.infos[instance.infoIndex].raw;
@@ -3906,30 +4154,44 @@ void MainWindow::PasteClipboard() {
     // shape and the group stands on what the view is centred on.
     Vec3 pivot{};
     float lowest = 1e30f;
+    std::vector<Vec3> anchors;
+    anchors.reserve(clipboard_.size());
+    bool containsRoad = false;
     for (const nfs::PlacedInstance& placed : clipboard_) {
-        pivot.x += placed.transform.m[3][0];
-        pivot.y += placed.transform.m[3][1];
-        lowest = std::min(lowest, placed.transform.m[3][2]);
+        const auto road = world_->RoadPlacementAnchor(placed);
+        containsRoad |= road.has_value();
+        const Vec3 anchor = road.value_or(placed.transform.TransformPoint({}));
+        anchors.push_back(anchor);
+        pivot.x += anchor.x;
+        pivot.y += anchor.y;
+        lowest = std::min(lowest, anchor.z);
     }
+    // Leave a small clearance when pasting a road onto a surface at the same height.
+    if (containsRoad && hit.Hit() && hit.distance < 2000.0f) point.z += 0.025f;
     pivot = pivot * (1.0f / (float)clipboard_.size());
     pivot.z = lowest;
     const Vec3 shift = point - pivot;
 
     std::vector<std::pair<u32, int>> pasted;
     size_t copiedModels = 0, skipped = 0;
-    for (nfs::PlacedInstance placed : clipboard_) {
+    for (size_t i = 0; i < clipboard_.size(); ++i) {
+        nfs::PlacedInstance placed = clipboard_[i];
+        if (world_->IsWorld()) {
+            placed.originalSection = ~0u;
+            placed.originalSceneryNumber = 0;
+            placed.originalRecord = ~0u;
+        }
         placed.transform.m[3][0] += shift.x;
         placed.transform.m[3][1] += shift.y;
         placed.transform.m[3][2] += shift.z;
-        const Vec3 at{ placed.transform.m[3][0], placed.transform.m[3][1], placed.transform.m[3][2] };
-        const size_t target = world_->SectionForPlacement(at);
+        const size_t target = world_->SectionForPlacement(anchors[i] + shift);
         nfs::LoadedSection* section = target == SIZE_MAX ? nullptr : world_->MutableLoaded(target);
         if (!section || !section->info) { ++skipped; continue; }
 
         // A model outside the library goes with its copies.
         const size_t home = world_->ModelHome(placed.modelHash);
         const bool library = home < world_->Loaded().size() && world_->IsLibrary(*world_->Loaded()[home]);
-        if (!library && !section->HoldsModel(placed.modelHash)) {
+        if (!world_->IsWorld() && !library && !section->HoldsModel(placed.modelHash)) {
             section->importedModels.push_back(placed.modelHash);
             ++copiedModels;
         }
@@ -3947,14 +4209,36 @@ void MainWindow::PasteClipboard() {
              pasted.size(), point.x, point.y, point.z, copiedModels, skipped);
 }
 
-bool MainWindow::SavePlacements() {
+bool MainWindow::SavePlacements(bool refreshWorldCollision) {
     if (!world_) return false;
-    if (RefuseReadOnlyWorld()) return false;
-    if (!HasUnsavedPlacements()) {
+    if (!world_->IsWorld() && RefuseReadOnlyWorld()) return false;
+    if (!HasUnsavedPlacements() && !(world_->IsWorld() && refreshWorldCollision)) {
         SetStatusText(2, L"No placements to write.");
         return true;
     }
 
+    if (world_->IsWorld()) {
+        // NFS World writes whole section BUNs under models\files; the loader
+        // serves them. Do not reopen: the editor reads the shipped files, so a
+        // reopen would drop the in-memory placements the overlay was built from.
+        std::wstring report;
+        if (!WriteNfswPlacementOverlays(*world_, modelsFolder_, report)) {
+            LOG_WARN("NFSW placements were not written:\n%S", report.c_str());
+            ::MessageBoxW(window_,
+                          (L"The NFS World section overlays were not written.\n\n" + report).c_str(),
+                          kWindowTitle, MB_ICONWARNING | MB_OK);
+            return false;
+        }
+        for (const auto& section : world_->Loaded()) {
+            section->placementsChanged = false;
+            section->collisionChanged = false;
+            section->changedCollisionPacks.clear();
+        }
+        for (auto& extension : extensions_) extension->OnSaved();
+        SetStatusText(2, L"NFS World section overlays written");
+        LOG_INFO("NFSW placements written:\n%S", report.c_str());
+        return true;
+    }
     PlacementSavePlan plan;
     const bool planned = PlanPlacementSave(*world_, modelsFolder_, plan);
     if (!planned && plan.ok && plan.spans.empty()) {
@@ -4120,6 +4404,57 @@ void MainWindow::UpdateProperties() {
         add(L"Object", L"Written", section->placementsChanged ? L"No -- Ctrl+Shift+S writes it" : L"Yes",
             L"Whether the game will see it yet.");
 
+    if (world_->IsWorld() && section) {
+        std::optional<nfs::NfswSmackablePlacement> smackable;
+        if (view.mode == PropertiesPanel::Mode::Placement)
+            smackable = section->placements[(size_t)picked.placement].instance.smackable;
+        else if (picked.IsNative())
+            smackable = world_->SmackablePlacement(*section, (size_t)picked.native);
+        const auto* link = smackable ? &smackable->link : nullptr;
+        if (!link && picked.IsNative())
+            link = world_->FindSmackableLink(*section, (size_t)picked.native);
+        if (link) {
+            add(L"Physics", L"Type", L"Smackable", L"A dynamic World scenery instance.");
+            add(L"Physics", L"Smackable hash", Format(L"0x%08X", link->physics),
+                L"Enter a hexadecimal smackable collection key from the active attribute pack. Ctrl+Shift+S writes the section overlay.");
+            view.rows.back().editable = true;
+            view.rows.back().field = kSmackableHashField;
+            if (smackable) {
+                const auto box = link->EditedBox(smackable->box);
+                const float sizes[] = { Length(box[4] - box[0]), Length(box[1] - box[0]), Length(box[2] - box[0]) };
+                if (link->singleBox) {
+                    const wchar_t* fields[] = { L"Collision width (m)", L"Collision depth (m)", L"Collision height (m)" };
+                    for (int i = 0; i < 3; ++i) {
+                        add(L"Physics", fields[i], Format(L"%.3f", sizes[i]),
+                            L"Edit this instance's collision box and save it with Ctrl+Shift+S.");
+                        view.rows.back().editable = true;
+                        view.rows.back().field = kSmackableBoxField + i;
+                    }
+                } else {
+                    add(L"Physics", L"Collision box", Format(L"%.2f x %.2f x %.2f m", sizes[0], sizes[1], sizes[2]),
+                        L"Width, depth and height of the original compound or non-box collision shape.");
+                }
+            }
+            add(L"Physics", L"Geometry", Format(L"%08X", link->geometry), L"The game's collision geometry key.");
+            if (const auto* preset = world_->FindSmackableAttributes(link->physics)) {
+                if (!preset->name.empty())
+                    add(L"Physics", L"Smackable preset", Widen(preset->name),
+                        world_->UsesSmackableAttributeOverlay()
+                            ? L"Collection in models\\files\\GLOBAL\\ATTRIBUTES.BIN (db / smackable)."
+                            : L"Collection in GLOBAL\\ATTRIBUTES.BIN (db / smackable).");
+                if (preset->mass)
+                    add(L"Physics", L"Mass", Format(L"%.6g", *preset->mass), L"MASS in the bound collection.");
+                if (preset->rigidBody)
+                    add(L"Physics", L"Rigid body", Format(L"0x%08X", preset->rigidBody),
+                        L"The rigidbodyspecs collection key, including inherited references.");
+                if (preset->baseMaterial || !preset->materialName.empty())
+                    add(L"Physics", L"Base material",
+                        preset->materialName.empty() ? Format(L"0x%08X", preset->baseMaterial) : Widen(preset->materialName),
+                        L"BASE_MATERIAL in the referenced rigidbodyspecs collection.");
+            }
+        }
+    }
+
     // The map's own objects can be moved too: the first change makes one a
     // placement (Viewport::DetachNatives).
     PropertiesPanel::AddTransformRows(view, view.mode == PropertiesPanel::Mode::Placement ||
@@ -4140,6 +4475,15 @@ void MainWindow::UpdateProperties() {
 }
 
 void MainWindow::ApplyPropertyFields(bool rehome) {
+    if (properties_.LastField() == kSmackableHashField && world_ && world_->IsWorld()) {
+        ApplySmackableBinding();
+        return;
+    }
+    if (world_ && world_->IsWorld() && properties_.LastField() >= kSmackableBoxField &&
+        properties_.LastField() < kSmackableBoxField + 3) {
+        ApplySmackableBox();
+        return;
+    }
     u32 section = 0;
     int placement = -1;
     if (!world_) return;
@@ -4150,6 +4494,68 @@ void MainWindow::ApplyPropertyFields(bool rehome) {
     if (!viewport_.SelectedPlacement(section, placement)) return;
     viewport_.SetPlacementTransform(section, placement, transform);
     if (rehome) viewport_.RehomePlacement(section, placement);
+}
+
+void MainWindow::ApplySmackableBinding() {
+    const auto& selection = viewport_.GetRenderer().Selection();
+    if (selection.size() != 1) return;
+    const auto& picked = selection.front();
+    auto* section = world_->MutableLoaded(picked.loadedSection);
+    if (!section) return;
+
+    std::wstring text;
+    if (!properties_.ReadText(kSmackableHashField, text)) return;
+    const size_t first = text.find_first_not_of(L" \t\r\n");
+    if (first != std::wstring::npos)
+        text = text.substr(first, text.find_last_not_of(L" \t\r\n") + 1 - first);
+    if (text.compare(0, 2, L"0x") == 0 || text.compare(0, 2, L"0X") == 0) text.erase(0, 2);
+    if (text.empty() || text.size() > 8 || text.find_first_not_of(L"0123456789abcdefABCDEF") != std::wstring::npos) {
+        SetStatusText(2, L"Enter a Smackable hash with 1 to 8 hexadecimal digits.");
+        UpdateProperties();
+        return;
+    }
+    const u32 key = (u32)::wcstoul(text.c_str(), nullptr, 16);
+    bool applied = false;
+    if (picked.IsPlacement() && (size_t)picked.placement < section->placements.size())
+        applied = world_->RebindSmackable(*section, section->placements[(size_t)picked.placement].instance, key);
+    else if (picked.IsNative())
+        applied = world_->RebindSmackable(*section, (size_t)picked.native, key);
+
+    UpdateProperties();
+    SetStatusText(2, applied ? L"Smackable binding set. Ctrl+Shift+S writes the section overlay."
+                             : L"The selected object or key is unavailable in the active Smackable attribute pack.");
+}
+
+void MainWindow::ApplySmackableBox() {
+    const auto& selection = viewport_.GetRenderer().Selection();
+    if (selection.size() != 1) return;
+    const auto& picked = selection.front();
+    auto* section = world_->MutableLoaded(picked.loadedSection);
+    if (!section) return;
+
+    const int axes[] = { 2, 0, 1 }; // displayed width/depth/height -> local Z/X/Y
+    nfs::NfswSmackableHalfSizes sizes{};
+    for (int i = 0; i < 3; ++i) {
+        float value = 0;
+        if (!properties_.ReadNumber(kSmackableBoxField + i, value) ||
+            !std::isfinite(value) || value < 0.002f || value > 65.534f) {
+            SetStatusText(2, L"Collision box dimensions must be between 0.002 and 65.534 m.");
+            UpdateProperties();
+            return;
+        }
+        sizes[axes[i]] = (i16)std::lround(value * 500.0f);
+    }
+
+    bool applied = false;
+    if (picked.IsPlacement() && (size_t)picked.placement < section->placements.size())
+        applied = world_->ResizeSmackableBox(*section, section->placements[(size_t)picked.placement].instance, sizes);
+    else if (picked.IsNative())
+        applied = world_->ResizeSmackableBox(*section, (size_t)picked.native, sizes);
+
+    if (applied) viewport_.GetRenderer().RebuildInstances(*world_);
+    UpdateProperties();
+    SetStatusText(2, applied ? L"Collision box resized. Ctrl+Shift+S writes the section overlay."
+                             : L"The selected instance does not have an editable single collision box.");
 }
 
 // ---------------------------------------------------------------------------
