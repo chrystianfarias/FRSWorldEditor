@@ -8,7 +8,8 @@
 # FRS World Editor
 
 An open-source world editor for the **Black Box Need for Speed games** --
-Underground, Underground 2, Most Wanted, Carbon and ProStreet
+Underground, Underground 2, Most Wanted, Carbon, ProStreet, Undercover and
+World
 
 These games share one engine family and much of its file formats: track
 streams split into sections, chunked geometry and texture packs, collision
@@ -32,23 +33,23 @@ If the editor helps you, you can [buy me a coffee](https://buymeacoffee.com/chry
 
 ✅ ready &nbsp; 🚧 in progress &nbsp; 🗓️ planned &nbsp; — not in that game
 
-| Feature | Underground | Underground 2 | Most Wanted | Carbon | ProStreet |
-| --- | :---: | :---: | :---: | :---: | :---: |
-| View the world as shipped (geometry, textures, scenery, lighting) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Its models in the Library, to place in Underground 2 | ✅ | — | ✅ | ✅ | ✅ |
-| Sky, animated textures, object animations | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Place, move, copy and remove objects | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Mesh editor and OBJ export / import | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Edit in Blender, new objects | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Collision: view, draw, edit, make from meshes | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Roads: draw, junctions, bridges, bake into the game | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Traffic and GPS routes for new roads | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Terrain: new patches, sculpting, fitting to roads | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Visibility zones: view and edit | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Named zones and quick travel | — | ✅ | 🗓️ | 🗓️ | — |
-| Worlds: separate sets of edits, per-edit revert, undo | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Game plugin: edits loaded into the running game | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ |
-| Launch the game into free roam at the camera | — | ✅ | 🗓️ | 🗓️ | — |
+| Feature | Underground | Underground 2 | Most Wanted | Carbon | ProStreet | Undercover | World |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| View the world as shipped (geometry, textures, scenery, lighting) | ✅ | ✅ | ✅ | ✅ | ✅ | 🗓️ | ✅ |
+| Its models in the Library, to place in Underground 2 | ✅ | — | ✅ | ✅ | ✅ | 🗓️ | 🗓️ |
+| Sky, animated textures, object animations | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ | 🗓️ | ✅ |
+| Place, move, copy and remove objects | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ | 🗓️ | ✅ |
+| Mesh editor and OBJ export / import | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ | 🗓️ | 🚧 |
+| Edit in Blender, new objects | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ | 🗓️ | 🗓️ |
+| Collision: view, draw, edit, make from meshes | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ | 🗓️ | ✅ |
+| Roads: draw, junctions, bridges, bake into the game | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ | 🗓️ | ✅ |
+| Traffic and GPS routes for new roads | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ | 🗓️ | 🚧 |
+| Terrain: new patches, sculpting, fitting to roads | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ | 🗓️ | 🗓️ |
+| Visibility zones: view and edit | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ | 🗓️ | 🗓️ |
+| Named zones and quick travel | — | ✅ | 🗓️ | 🗓️ | — | 🗓️ | 🗓️ |
+| Worlds: separate sets of edits, per-edit revert, undo | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ | 🗓️ | 🗓️ |
+| Game plugin: edits loaded into the running game | 🗓️ | ✅ | 🗓️ | 🗓️ | 🗓️ | 🗓️ | ✅ |
+| Launch the game into free roam at the camera | — | ✅ | 🗓️ | 🗓️ | — | 🗓️ | 🗓️ |
 
 Underground and ProStreet have no free roam: in those games the editor will
 launch into a race instead.
@@ -58,6 +59,12 @@ ProStreet (every track) open read-only for now: to look around and export
 from. Their models are already in Underground 2's Library -- pick the game in
 its Game filter -- and are converted to Underground 2's format when the world
 is saved.
+
+World is editable: objects, collision and roads are written as section
+overlays under `<game>\models\files`, which its own plugin
+(`FRSWorldLoaderNFSW.asi`) loads in place of the shipped files. That plugin
+is not in the release package yet. World support was contributed by
+[ZIL1N](https://github.com/zilinkids).
 
 ## What it does (Underground 2)
 
@@ -226,8 +233,9 @@ does inside the game, address by address.
   references for the engine internals.
 
 Need for Speed, Need for Speed Underground, Underground 2, Most Wanted,
-Carbon and ProStreet are trademarks of Electronic Arts. This is a fan project,
-not affiliated with or endorsed by EA; you need your own copy of each game.
+Carbon, ProStreet, Undercover and World are trademarks of Electronic Arts.
+This is a fan project, not affiliated with or endorsed by EA; you need your
+own copy of each game.
 
 ## License
 
