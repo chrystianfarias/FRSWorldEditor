@@ -4,6 +4,7 @@
 #       FRSWorldEditor.exe               the editor; its setup installs the game side
 #       game\dinput8.dll                 Ultimate ASI Loader (ThirteenAG, MIT)
 #       game\scripts\FRSWorldLoader.asi  the editor's end in the game
+#       game\scripts\FRSWorldLoaderNFSW.asi  NFS World section overlays
 #       game\scripts\FRSFastTest.asi     Launch Game straight into free roam
 #       README.txt, LICENSE.txt
 #   dist\FRSWorldEditor-<version>.zip    the same, zipped
@@ -58,7 +59,7 @@ function Build([string]$source, [string]$binary, [string]$arch, [string[]]$optio
 # ---- build: the editor is x64, the game and its plugins are 32-bit
 "[..] building the editor"
 Build $root (Join-Path $root "build-release") "x64" @("-DFRS_WITH_EXTENSIONS=$extensions", "-DFRS_WITH_REGIONS=$regions")
-"[..] building FRS World Loader"
+"[..] building FRS World Loader for Underground 2 and NFS World"
 Build (Join-Path $root "loader") (Join-Path $root "loader\build-release") "Win32" @("-DFRS_WITH_EXTENSIONS=$extensions")
 if (-not (Test-Path (Join-Path $FastTest "CMakeLists.txt"))) {
     throw "FRSFastTest's repository is not at $FastTest (pass -FastTest <folder>)"
@@ -92,6 +93,7 @@ Copy-Item (Join-Path $root "build-release\bin\Release\FRSWorldEditor.exe") $stag
 Copy-Item (Join-Path $root "packaging\README.txt") $stage
 Copy-Item (Join-Path $asiLoader "dinput8.dll") (Join-Path $stage "game")
 Copy-Item (Join-Path $root "loader\build-release\Release\FRSWorldLoader.asi") $scripts
+Copy-Item (Join-Path $root "loader\build-release\Release\FRSWorldLoaderNFSW.asi") $scripts
 Copy-Item (Join-Path $root "loader\FRSWorldLoader.ini") $scripts
 Copy-Item (Join-Path $FastTest "build\nfsu2\FRSFastTest.asi") $scripts
 Copy-Item (Join-Path $FastTest "games\nfsu2\FRSFastTest.ini") $scripts
@@ -105,7 +107,8 @@ $license = @(
     "",
     $rule,
     "1. FRS World Editor (FRSWorldEditor.exe), FRS World Loader",
-    "   (game\scripts\FRSWorldLoader.asi) and FRSFastTest (game\scripts\FRSFastTest.asi),",
+    "   (game\scripts\FRSWorldLoader.asi and game\scripts\FRSWorldLoaderNFSW.asi)",
+    "   and FRSFastTest (game\scripts\FRSFastTest.asi),",
     "   by Chrystian Farias -- https://buymeacoffee.com/chrystianfarias",
     "   Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)",
     "   You may share and adapt them, crediting Chrystian Farias, for non-commercial",

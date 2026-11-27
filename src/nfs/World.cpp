@@ -496,13 +496,67 @@ std::pair<LoadedSection*, size_t> World::SmackableSource(const PlacedInstance& i
     return { nullptr, SIZE_MAX };
 }
 
+NfswSmackableLink* World::SmackableState::Link() const {
+    if (placement) {
+        if (index >= section->placements.size()) return nullptr;
+        auto& item = section->placements[index].instance.smackable;
+        return item ? &item->link : nullptr;
+    }
+    return index < section->smackableLinks.size() ? &section->smackableLinks[index] : nullptr;
+}
+
+bool World::SmackableState::Changed() const {
+    const auto* link = Link();
+    return link && (link->physics != physics || link->halfSizes != halfSizes);
+}
+
+void World::SmackableState::Restore() const {
+    if (auto* link = Link()) {
+        link->physics = physics;
+        link->halfSizes = halfSizes;
+        section->placementsChanged = placementsChanged;
+    }
+}
+
+std::vector<World::SmackableState> World::CaptureSmackable(LoadedSection& section, size_t index, bool placement) {
+    std::vector<SmackableState> states;
+    const auto capture = [&states](LoadedSection& owner, size_t linkIndex, bool placed) {
+        SmackableState state{ &owner, linkIndex, placed, owner.placementsChanged, 0, std::nullopt };
+        if (const auto* link = state.Link()) {
+            state.physics = link->physics;
+            state.halfSizes = link->halfSizes;
+            states.push_back(state);
+        }
+    };
+    const auto captureNative = [&capture](LoadedSection& owner, size_t sceneryIndex) {
+        const auto binding = owner.smackableScenery.find(sceneryIndex);
+        if (binding != owner.smackableScenery.end()) capture(owner, binding->second, false);
+    };
+
+    if (placement) {
+        capture(section, index, true);
+        if (!states.empty()) {
+            const auto& item = section.placements[index].instance;
+            if (item.originalRecord != ~0u) {
+                const auto [source, sourceIndex] = SmackableSource(item);
+                if (source) captureNative(*source, sourceIndex);
+            }
+        }
+    } else {
+        captureNative(section, index);
+    }
+    return states;
+}
+
 bool World::ResizeSmackableBox(LoadedSection& section, size_t index, const NfswSmackableHalfSizes& sizes) {
     const auto binding = section.smackableScenery.find(index);
     if (binding == section.smackableScenery.end()) return false;
     auto& link = section.smackableLinks[binding->second];
     if (!link.singleBox || *std::min_element(sizes.begin(), sizes.end()) <= 0) return false;
-    link.halfSizes = sizes;
-    section.placementsChanged = true;
+    if (link.halfSizes != sizes) {
+        link.halfSizes = sizes;
+        section.placementsChanged = true;
+    }
     return true;
 }
 
@@ -513,8 +567,10 @@ bool World::ResizeSmackableBox(LoadedSection& section, PlacedInstance& item, con
         const auto [source, index] = SmackableSource(item);
         if (!source || !ResizeSmackableBox(*source, index, sizes)) return false;
     }
-    item.smackable->link.halfSizes = sizes;
-    section.placementsChanged = true;
+    if (item.smackable->link.halfSizes != sizes) {
+        item.smackable->link.halfSizes = sizes;
+        section.placementsChanged = true;
+    }
     return true;
 }
 

@@ -1,7 +1,7 @@
 FRS World Editor
 ================
 
-A map editor for Need for Speed Underground 2, by Chrystian Farias.
+A map editor for Need for Speed Underground 2 and NFS World, by Chrystian Farias.
 
 Fly through the city exactly as the game ships it, then move, add and remove
 objects, edit collision, import your own meshes and textures -- and launch
@@ -47,8 +47,17 @@ the "models" folder inside the game folder: delete it, and the game is back
 exactly as it shipped.
 
 
-GAME VERSION
-------------
+NFS WORLD
+---------
+
+Copy game\scripts\FRSWorldLoaderNFSW.asi from this package into the scripts
+folder beside nfsw.exe (create the scripts folder if needed). If World has
+no ASI loader, copy game\dinput8.dll beside nfsw.exe. The World plugin serves
+edits from models\files without replacing the game's original files.
+
+
+UNDERGROUND 2 GAME VERSION
+--------------------------
 
 The plugins are written for SPEED2.EXE v1.2 (4,800,512 bytes,
 MD5 6445adbf4e8d64be51e96a69bba168a4). The editor opens any version's files;

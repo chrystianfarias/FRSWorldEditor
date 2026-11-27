@@ -268,6 +268,22 @@ public:
     bool RebindSmackable(LoadedSection& section, PlacedInstance& instance, u32 key);
     bool ResizeSmackableBox(LoadedSection& section, size_t index, const NfswSmackableHalfSizes& sizes);
     bool ResizeSmackableBox(LoadedSection& section, PlacedInstance& instance, const NfswSmackableHalfSizes& sizes);
+    struct SmackableState {
+        LoadedSection* section = nullptr;
+        size_t index = 0; // placement index or native link index
+        bool placement = false;
+        bool placementsChanged = false;
+        u32 physics = 0;
+        std::optional<NfswSmackableHalfSizes> halfSizes;
+
+        bool Changed() const;
+        void Restore() const;
+
+    private:
+        friend class World;
+        NfswSmackableLink* Link() const;
+    };
+    std::vector<SmackableState> CaptureSmackable(LoadedSection& section, size_t index, bool placement);
     const NfswSmackableAttributes* FindSmackableAttributes(u32 key) const;
     bool ReloadSmackableAttributes();
     std::wstring NfswAttributesFile(bool* overlay = nullptr) const;

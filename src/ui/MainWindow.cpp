@@ -843,6 +843,7 @@ void MainWindow::OnCreate() {
         host.world = [this] { return world_.get(); };
         host.status = [this](const std::wstring& text) { SetStatusText(2, text); };
         host.menuChecks = [this] { UpdateMenuChecks(); };
+        host.updateProperties = [this] { UpdateProperties(); };
         host.activateTool = [this] { return ActivateViewportTool(collisionTools_); };
         auto tools = std::make_unique<CollisionTools>(std::move(host));
         collisionTools_ = tools.get();
@@ -4515,11 +4516,11 @@ void MainWindow::ApplySmackableBinding() {
         return;
     }
     const u32 key = (u32)::wcstoul(text.c_str(), nullptr, 16);
-    bool applied = false;
-    if (picked.IsPlacement() && (size_t)picked.placement < section->placements.size())
-        applied = world_->RebindSmackable(*section, section->placements[(size_t)picked.placement].instance, key);
-    else if (picked.IsNative())
-        applied = world_->RebindSmackable(*section, (size_t)picked.native, key);
+    const bool applied = collisionTools_->EditSmackable(picked, [&] {
+        if (picked.IsPlacement() && (size_t)picked.placement < section->placements.size())
+            return world_->RebindSmackable(*section, section->placements[(size_t)picked.placement].instance, key);
+        return picked.IsNative() && world_->RebindSmackable(*section, (size_t)picked.native, key);
+    });
 
     UpdateProperties();
     SetStatusText(2, applied ? L"Smackable binding set. Ctrl+Shift+S writes the section overlay."
@@ -4546,11 +4547,11 @@ void MainWindow::ApplySmackableBox() {
         sizes[axes[i]] = (i16)std::lround(value * 500.0f);
     }
 
-    bool applied = false;
-    if (picked.IsPlacement() && (size_t)picked.placement < section->placements.size())
-        applied = world_->ResizeSmackableBox(*section, section->placements[(size_t)picked.placement].instance, sizes);
-    else if (picked.IsNative())
-        applied = world_->ResizeSmackableBox(*section, (size_t)picked.native, sizes);
+    const bool applied = collisionTools_->EditSmackable(picked, [&] {
+        if (picked.IsPlacement() && (size_t)picked.placement < section->placements.size())
+            return world_->ResizeSmackableBox(*section, section->placements[(size_t)picked.placement].instance, sizes);
+        return picked.IsNative() && world_->ResizeSmackableBox(*section, (size_t)picked.native, sizes);
+    });
 
     if (applied) viewport_.GetRenderer().RebuildInstances(*world_);
     UpdateProperties();
