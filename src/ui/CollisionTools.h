@@ -26,6 +26,7 @@ struct CollisionToolsHost {
     std::function<nfs::World*()> world;
     std::function<void(const std::wstring&)> status;   // the status bar's message part
     std::function<void()> menuChecks;                   // the window's UpdateMenuChecks
+    std::function<void()> updateProperties;
     std::function<bool()> activateTool;
 };
 
@@ -59,6 +60,7 @@ public:
     // tool, a generator. Call RefreshAfterEdit() after changing through it.
     collision::Editor& Editor() { return editor_; }
     void RefreshAfterEdit();
+    bool EditSmackable(const PickResult& picked, const std::function<bool()>& apply);
 
     // ---- EditorExtension
     void OnCreate() override;
@@ -119,9 +121,14 @@ private:
     void RestorePlacements(const PlacementState& state);
     size_t PlacementSignature() const;
     void ResetHistory();
-    void WatchHistory();
-    enum class StepKind : char { Collision, Placements };
-    struct Step { StepKind kind; u64 stamp; };   // stamp: the editor-wide undo order
+    void WatchHistory(bool settlePlacements = false);
+    void TrimHistory();
+    enum class StepKind : char { Collision, Placements, Smackable };
+    struct Step {
+        StepKind kind;
+        u64 stamp;
+        std::vector<nfs::World::SmackableState> smackables = {};
+    };
     std::vector<Step> history_;
     std::vector<PlacementState> placementUndo_;
     PlacementState settled_;          // the placements as they last came to rest

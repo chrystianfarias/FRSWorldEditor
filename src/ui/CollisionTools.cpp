@@ -577,6 +577,9 @@ void CollisionTools::SetSelectionWorldSurface(size_t index) {
 }
 
 void CollisionTools::OnSaved() {
+    // An undo across a save must write the restored state on the next save.
+    for (auto& step : history_)
+        for (auto& state : step.smackables) state.placementsChanged = true;
     const std::wstring path = LogPath();
     if (path.empty()) return;
     if (!collision::SaveLog(path, editor_.Log())) LOG_WARN("collision log could not be written to %S", path.c_str());
@@ -777,15 +780,21 @@ bool CollisionTools::UndoLatest() {
     WatchHistory();
     if (history_.empty()) return false;
 
-    const StepKind kind = history_.back().kind;
+    Step step = std::move(history_.back());
     history_.pop_back();
-    if (kind == StepKind::Collision) {
+    if (step.kind == StepKind::Collision) {
         const std::wstring label = editor_.UndoLabel();
         if (!editor_.Undo()) { Status(L"That collision edit is too old to undo."); return true; }
         ++seenUndone_;
         Renderer().SetCollisionSelectionList({});
         RefreshAfterEdit();
         Status(L"Undone: " + label);
+    } else if (step.kind == StepKind::Smackable) {
+        for (const auto& state : step.smackables) state.Restore();
+        settled_ = CapturePlacements();
+        Renderer().RebuildInstances(*World());
+        if (host_.updateProperties) host_.updateProperties();
+        Status(L"Undone: the last Smackable edit");
     } else if (!placementUndo_.empty()) {
         PlacementState state = std::move(placementUndo_.back());
         placementUndo_.pop_back();
@@ -801,6 +810,27 @@ bool CollisionTools::UndoLatest() {
 // ---------------------------------------------------------------------------
 // Undo history
 // ---------------------------------------------------------------------------
+
+bool CollisionTools::EditSmackable(const PickResult& picked, const std::function<bool()>& apply) {
+    nfs::World* world = World();
+    if (!world || !world->IsWorld() || (!picked.IsPlacement() && !picked.IsNative())) return false;
+    auto* section = world->MutableLoaded(picked.loadedSection);
+    if (!section) return false;
+
+    WatchHistory(true);
+    const bool placed = picked.IsPlacement();
+    auto before = world->CaptureSmackable(*section, (size_t)(placed ? picked.placement : picked.native), placed);
+    if (!apply()) return false;
+    before.erase(std::remove_if(before.begin(), before.end(), [](const auto& state) { return !state.Changed(); }),
+                 before.end());
+    if (!before.empty()) {
+        history_.push_back({ StepKind::Smackable, undo::NextStamp(), std::move(before) });
+        settled_ = CapturePlacements();
+        TrimHistory();
+        if (host_.menuChecks) host_.menuChecks();
+    }
+    return true;
+}
 
 CollisionTools::PlacementState CollisionTools::CapturePlacements() const {
     PlacementState state;
@@ -863,7 +893,7 @@ void CollisionTools::ResetHistory() {
     seenUndone_ = editor_.StepsUndone();
 }
 
-void CollisionTools::WatchHistory() {
+void CollisionTools::WatchHistory(bool settlePlacements) {
     if (!World()) return;
 
     // Collision steps, in the order the editor recorded them; one it took
@@ -880,7 +910,8 @@ void CollisionTools::WatchHistory() {
 
     // Placements: one step each time they come to rest in a new state. While
     // something is being dragged they are not at rest.
-    if (host_.viewport->Transforming() || host_.viewport->GizmoDragging() || ::GetKeyState(VK_LBUTTON) < 0)
+    if (!settlePlacements &&
+        (host_.viewport->Transforming() || host_.viewport->GizmoDragging() || ::GetKeyState(VK_LBUTTON) < 0))
         return;
     const size_t signature = PlacementSignature();
     if (signature == settledSignature_) return;
@@ -888,7 +919,10 @@ void CollisionTools::WatchHistory() {
     history_.push_back({ StepKind::Placements, undo::NextStamp() });
     settled_ = CapturePlacements();
     settledSignature_ = signature;
+    TrimHistory();
+}
 
+void CollisionTools::TrimHistory() {
     // A hundred steps back is plenty; the oldest go first.
     while (history_.size() > 100) {
         if (history_.front().kind == StepKind::Placements && !placementUndo_.empty())
